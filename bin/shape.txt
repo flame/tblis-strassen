@@ -1,0 +1,11 @@
+abij abef efij & a:128;b:128;e:128;f:128;i:128;j:128;
+abij abef efij & a:136;b:136;e:136;f:136;i:112;j:112;
+abij abef efij & a:144;b:144;e:144;f:144;i:100;j:100;
+abij abef efij & a:152;b:152;e:152;f:152;i:88;j:88;
+abij abef efij & a:160;b:160;e:160;f:160;i:80;j:80;
+abij abef efij & a:168;b:168;e:168;f:168;i:72;j:72;
+abij abef efij & a:176;b:176;e:176;f:176;i:64;j:64;
+abij abef efij & a:184;b:184;e:184;f:184;i:56;j:56;
+abij abef efij & a:192;b:192;e:192;f:192;i:52;j:52;
+abij abef efij & a:200;b:200;e:200;f:200;i:48;j:48;
+abij abef efij & a:208;b:208;e:208;f:208;i:40;j:40;

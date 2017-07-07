@@ -1,0 +1,23 @@
+Common Command:
+
+./configure CC=gcc-4.9 CXX=g++-4.9 CXXFLAGS="-O0 -g -DTBLIS_DEBUG" CFLAGS="-O0 -g -DTBLIS_DEBUG" --disable-shared
+make -j 4
+export OMP_NUM_THREADS=1
+
+module load autotools
+autoreconf -i
+
+--disable-threading
+--enable-threading=openmp
+
+./configure CXXFLAGS="-g -Wall -O0" --enable-config=sandybridge --disable-shared
+
+./configure --prefix=$HOME/lib --disable-shared
+
+find . -name "*~" -type f -delete
+tar -zcvf tblis-strassen.tar.gz tblis_strassen
+
+./test_strassen -m 16 -n 16 -k 16 -niter 3 -level 1 -impl 1
+
+make maintainer-clean
+

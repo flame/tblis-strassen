@@ -1,0 +1,6 @@
+abc acd db       & a:480;b:480;c:480;d:480;
+abc adc bd       & a:480;b:480;c:480;d:480;
+ab ac cb         & a:5136;b:5120;c:5136;
+abcd aebf fdec   & a:72;b:72;c:72;d:72;e:72;f:72;
+abcd eafd fbec   & a:72;b:72;c:72;d:72;e:72;f:72;
+abcd aebf dfce   & a:72;b:72;c:72;d:72;e:72;f:72;

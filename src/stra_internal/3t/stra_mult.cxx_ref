@@ -1,0 +1,1391 @@
+#include "stra_mult.hpp"
+
+#include "util/gemm_thread.hpp"
+#include "util/tensor.hpp"
+
+#include "matrix/stra_tensor_view.hpp"
+//#include "matrix/stra_block_scatter_matrix.hpp"
+
+#include "stra_nodes/stra_matrify.hpp"
+#include "stra_nodes/stra_partm.hpp"
+#include "stra_nodes/stra_gemm_ukr.hpp"
+
+#include "internal/1t/add.hpp"
+#include "stra_internal/3m/stra_mult.hpp"
+
+#define PRINT_VECTOR( name ) \
+    std::cout << #name << std::endl; \
+    for (auto &elem : name) \
+    { \
+        std::cout << elem << " "; \
+    } \
+    std::cout << std::endl;
+
+
+
+namespace tblis
+{
+namespace internal
+{
+
+//impl_t impl = BLIS_BASED;
+
+extern MemoryPool BuffersForA, BuffersForB, BuffersForScatter;
+//MemoryPool BuffersForScatter(4096);
+
+using StraTensorGEMM = stra_partition_gemm_nc<
+                         stra_partition_gemm_kc<
+                           //stra_matrify_and_pack_b<BuffersForB,
+                           stra_pack_b<BuffersForB,
+                             stra_partition_gemm_mc<
+                               //stra_matrify_and_pack_a<BuffersForA,
+                               stra_pack_a<BuffersForA,
+                                 //stra_matrify_c<BuffersForScatter,
+                                   stra_partition_gemm_nr<
+                                     stra_partition_gemm_mr<
+                                       stra_gemm_micro_kernel>>>>>>>; //>;
+
+template <typename T>
+void stra_contract_blas(const communicator& comm, const config& cfg,
+                        const std::vector<len_type>& len_AB,
+                        const std::vector<len_type>& len_AC,
+                        const std::vector<len_type>& len_BC,
+                        T alpha, const T* A,
+                        const std::vector<stride_type>& stride_A_AB,
+                        const std::vector<stride_type>& stride_A_AC,
+                                 const T* B,
+                        const std::vector<stride_type>& stride_B_AB,
+                        const std::vector<stride_type>& stride_B_BC,
+                        T  beta,       T* C,
+                        const std::vector<stride_type>& stride_C_AC,
+                        const std::vector<stride_type>& stride_C_BC)
+{
+    tensor<T> ar, br, cr;
+    T* ptrs_local[3];
+    T** ptrs = &ptrs_local[0];
+
+    if (comm.master())
+    {
+        ar.reset(len_AC+len_AB);
+        br.reset(len_AB+len_BC);
+        cr.reset(len_AC+len_BC);
+        ptrs[0] = ar.data();
+        ptrs[1] = br.data();
+        ptrs[2] = cr.data();
+    }
+
+    comm.broadcast(ptrs);
+
+    tensor_view<T> arv(len_AC+len_AB, ptrs[0]);
+    tensor_view<T> brv(len_AB+len_BC, ptrs[1]);
+    tensor_view<T> crv(len_AC+len_BC, ptrs[2]);
+
+    matrix_view<T> am, bm, cm;
+    matricize<T>(arv, am, static_cast<unsigned>(len_AC.size()));
+    matricize<T>(brv, bm, static_cast<unsigned>(len_AB.size()));
+    matricize<T>(crv, cm, static_cast<unsigned>(len_AC.size()));
+
+    add(comm, cfg, {}, {}, arv.lengths(),
+        T(1), false,          A, {}, stride_A_AC+stride_A_AB,
+        T(0), false, arv.data(), {},           arv.strides());
+
+    add(comm, cfg, {}, {}, brv.lengths(),
+        T(1), false,          B, {}, stride_B_AB+stride_B_BC,
+        T(0), false, brv.data(), {},           brv.strides());
+
+    stra_mult(comm, cfg, cm.length(0), cm.length(1), am.length(1),
+              alpha, false, am.data(), am.stride(0), am.stride(1),
+                     false, bm.data(), bm.stride(0), bm.stride(1),
+               T(0), false, cm.data(), cm.stride(0), cm.stride(1));
+
+    add(comm, cfg, {}, {}, crv.lengths(),
+        T(1), false, crv.data(), {},            crv.strides(),
+        beta, false,          C, {}, stride_C_AC+stride_C_BC);
+}
+
+template <typename T>
+void stra_contract_ref(const communicator& comm, const config& cfg,
+                       const std::vector<len_type>& len_AB,
+                       const std::vector<len_type>& len_AC,
+                       const std::vector<len_type>& len_BC,
+                       T alpha, const T* A,
+                       const std::vector<stride_type>& stride_A_AB,
+                       const std::vector<stride_type>& stride_A_AC,
+                                const T* B,
+                       const std::vector<stride_type>& stride_B_AB,
+                       const std::vector<stride_type>& stride_B_BC,
+                       T  beta,       T* C,
+                       const std::vector<stride_type>& stride_C_AC,
+                       const std::vector<stride_type>& stride_C_BC)
+{
+    (void)cfg;
+
+    MArray::viterator<2> iter_AB(len_AB, stride_A_AB, stride_B_AB);
+    MArray::viterator<2> iter_AC(len_AC, stride_A_AC, stride_C_AC);
+    MArray::viterator<2> iter_BC(len_BC, stride_B_BC, stride_C_BC);
+    len_type m = stl_ext::prod(len_AC);
+    len_type n = stl_ext::prod(len_BC);
+
+    len_type m_min, m_max, n_min, n_max;
+    std::tie(m_min, m_max, std::ignore,
+             n_min, n_max, std::ignore) = comm.distribute_over_threads_2d(m, n);
+
+    const T* A0 = A;
+    const T* B0 = B;
+          T* C0 = C;
+
+    iter_AC.position(m_min, A0, C0);
+
+    for (len_type i = m_min;i < m_max;i++)
+    {
+        iter_AC.next(A0, C0);
+
+        A = A0;
+        B = B0;
+        C = C0;
+
+        iter_BC.position(n_min, B, C);
+
+        for (len_type j = n_min;j < n_max;j++)
+        {
+            iter_BC.next(B, C);
+
+            T temp = T();
+
+            while (iter_AB.next(A, B))
+            {
+                temp += (*A)*(*B);
+            }
+            temp *= alpha;
+
+            if (beta == T(0))
+            {
+                *C = temp;
+            }
+            else
+            {
+                *C = temp + beta*(*C);
+            }
+        }
+    }
+}
+
+//template <>
+void stra_divide_vector(
+          std::vector<len_type>& vec,
+          int divisor
+          )
+{
+    //for (auto &elem : vec) {
+    //    elem /= divisor;
+    //}
+
+    int last_idx = vec.size() - 1;
+    vec[ last_idx ] /= divisor;
+}
+
+template <typename T>
+void stra_acquire_mpart(
+          const len_type m,
+          const len_type n,
+          stride_type* rscat,
+          stride_type* cscat,
+          int x, int y, int s, int t,
+          T* srcM, T** dstM
+          )
+{
+    *dstM = &srcM[ rscat[ m / x * s ] + cscat[ n / y * t ] ]; //src( m/x*i, n/y*j )
+}
+
+
+
+//stra_acquire_tpart( sub_len_AB, sub_len_AC, stride_A_AB, stride_A_AC, 2, 2, 0, 0, A, &A_0 );
+template <typename T>
+void stra_acquire_tpart(
+          const std::vector<len_type>& len_m,
+          const std::vector<len_type>& len_n,
+          const std::vector<stride_type>& rs,
+          const std::vector<stride_type>& cs,
+          int x, int y, int s, int t,
+          T* srcM, T** dstM
+          )
+{
+    //*dstM = &srcM[ ( m / x * s ) * rs + ( n / y * t ) * cs ]; //src( m/x*i, n/y*j )
+    len_type offset = 0;
+    //for (int i = 0; i < len_m.size(); i++ ) {
+    //    offset += ( len_m[i] / x * s ) * rs[i];
+    //}
+    //for (int i = 0; i < len_n.size(); i++ ) {
+    //    offset += ( len_n[i] / y * t ) * cs[i];
+    //}
+    int last_idx = len_m.size() - 1;
+    offset += ( len_m[ last_idx ] / x * s ) * rs[ last_idx ];
+    last_idx = len_n.size() - 1;
+    offset += ( len_n[ last_idx ] / y * t ) * cs[ last_idx ];
+    *dstM = &srcM[ offset ]; //src( m/x*i, n/y*j )
+}
+
+template<typename T>
+void print_tensor_matrix( tensor_matrix<T> C ) {
+    len_type m = C.length(0);
+    len_type n = C.length(1);
+    stride_type* scat_buffer = (stride_type*)malloc( sizeof(stride_type) * (m + n) );
+    stride_type* rs_c = scat_buffer;
+    stride_type* cs_c = scat_buffer + m;
+    // Generate rs_c, cs_c;
+    C.fill_scatter(0, rs_c);
+    C.fill_scatter(1, cs_c);
+    //for ( len_AC: stride_C_AC )
+    //    for ( len_BC : stride_C_BC )
+    //        printf ....
+    //m = MULT( len_AC )
+    //n = MULT( len_BC )
+    for (len_type i = 0;i < m;i++)
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            std::cout << (C.data())[rs_c[i] + cs_c[j]]  << " ";
+        }
+        std::cout << std::endl;
+    }
+    free(scat_buffer);
+}
+
+template <typename T>
+void stra_contract_blis(const communicator& comm, const config& cfg,
+                        const std::vector<len_type>& len_AB,
+                        const std::vector<len_type>& len_AC,
+                        const std::vector<len_type>& len_BC,
+                        T alpha, const T* A,
+                        const std::vector<stride_type>& stride_A_AB,
+                        const std::vector<stride_type>& stride_A_AC,
+                                 const T* B,
+                        const std::vector<stride_type>& stride_B_AB,
+                        const std::vector<stride_type>& stride_B_BC,
+                        T  beta,       T* C,
+                        const std::vector<stride_type>& stride_C_AC,
+                        const std::vector<stride_type>& stride_C_BC)
+{
+    //std::cout << "Enter stra_internal/3t/stra_mult/stra_contract_blis\n" << std::endl;
+
+    //PRINT_VECTOR( len_AB )
+    //PRINT_VECTOR( len_AC )
+    //PRINT_VECTOR( len_BC )
+    //PRINT_VECTOR( stride_A_AB )
+    //PRINT_VECTOR( stride_A_AC )
+    //PRINT_VECTOR( stride_B_AB )
+    //PRINT_VECTOR( stride_B_BC )
+    //PRINT_VECTOR( stride_C_AC )
+    //PRINT_VECTOR( stride_C_BC )
+
+
+    auto reorder_AC = detail::sort_by_stride(stride_C_AC, stride_A_AC);
+    auto reorder_BC = detail::sort_by_stride(stride_C_BC, stride_B_BC);
+    auto reorder_AB = detail::sort_by_stride(stride_A_AB, stride_B_AB);
+
+    //PRINT_VECTOR( reorder_AC )
+    //PRINT_VECTOR( reorder_BC )
+    //PRINT_VECTOR( reorder_AB )
+
+    auto my_len_AC = stl_ext::permuted(len_AC, reorder_AC);
+    auto my_len_AB = stl_ext::permuted(len_AB, reorder_AB);
+    auto my_len_BC = stl_ext::permuted(len_BC, reorder_BC);
+
+
+    auto my_stride_A_AC = stl_ext::permuted(stride_A_AC, reorder_AC);
+    auto my_stride_A_AB = stl_ext::permuted(stride_A_AB, reorder_AB);
+;
+    auto my_stride_B_AB = stl_ext::permuted(stride_B_AB, reorder_AB);
+    auto my_stride_B_BC = stl_ext::permuted(stride_B_BC, reorder_BC);
+;
+    auto my_stride_C_AC = stl_ext::permuted(stride_C_AC, reorder_AC);
+    auto my_stride_C_BC = stl_ext::permuted(stride_C_BC, reorder_BC);
+
+
+    tensor_matrix<T> at(my_len_AC,
+                        my_len_AB,
+                        const_cast<T*>(A),
+                        my_stride_A_AC,
+                        my_stride_A_AB);
+
+    tensor_matrix<T> bt(my_len_AB,
+                        my_len_BC,
+                        const_cast<T*>(B),
+                        my_stride_B_AB,
+                        my_stride_B_BC);
+
+    tensor_matrix<T> ct(my_len_AC,
+                        my_len_BC,
+                        C,
+                        my_stride_C_AC,
+                        my_stride_C_BC);
+
+    const bool row_major = cfg.gemm_row_major.value<T>();
+
+    //if (ct.stride(!row_major) == 1)
+    //{
+    //    /*
+    //     * Compute C^T = B^T * A^T instead
+    //     */
+    //    at.swap(bt);
+    //    at.transpose();
+    //    bt.transpose();
+    //    ct.transpose();
+    //}
+
+    StraTensorGEMM stra_gemm;
+
+    len_type m = ct.length(0);
+    len_type n = ct.length(1);
+    len_type k = at.length(1);
+
+    int nt = comm.num_threads();
+    auto tc = make_gemm_thread_config<T>(cfg, nt, m, n, k);
+    step<0>(stra_gemm).distribute = tc.jc_nt;
+    step<3>(stra_gemm).distribute = tc.ic_nt;
+    step<5>(stra_gemm).distribute = tc.jr_nt;
+    step<6>(stra_gemm).distribute = tc.ir_nt;
+
+    //stra_gemm(comm, cfg, alpha, at, bt, beta, ct);
+
+    // M0 = (1 * A_0 + 1 * A_3) * (1 * B_0 + 1 * B_3);  C_0 += 1 * M0;  C_3 += 1 * M0;
+
+    MemoryPool::Block scat_buffer;
+    stride_type* A_rscat = nullptr;
+    stride_type* A_cscat = nullptr;
+    stride_type* A_rbs = nullptr;
+    stride_type* A_cbs = nullptr;
+    stride_type* B_rscat = nullptr;
+    stride_type* B_cscat = nullptr;
+    stride_type* B_rbs = nullptr;
+    stride_type* B_cbs = nullptr;
+    stride_type* C_rscat = nullptr;
+    stride_type* C_cscat = nullptr;
+    stride_type* C_rbs = nullptr;
+    stride_type* C_cbs = nullptr;
+
+    //if (!rscat)
+    {   
+        if (comm.master())
+        {   
+
+            scat_buffer = BuffersForScatter.allocate<stride_type>( 2*(m+n) + 2*(m+k) + 2*(k+n) );
+            A_rscat = scat_buffer.get<stride_type>();
+            //A_rscat = (stride_type*)malloc( sizeof(stride_type) * (m + n) * 2 * 3 );
+        }
+
+        comm.broadcast(A_rscat);
+
+        A_cscat = A_rscat+m;
+        A_rbs   = A_cscat+k;
+        A_cbs   = A_rbs+m;
+
+        B_rscat = A_cbs+k;
+        B_cscat = B_rscat+k;
+        B_rbs   = B_cscat+n;
+        B_cbs   = B_rbs+k;
+
+        C_rscat = B_cbs+n;
+        C_cscat = C_rscat+m;
+        C_rbs   = C_cscat+n;
+        C_cbs   = C_rbs+m;
+        
+    }
+
+    const len_type MB = cfg.gemm_mr.def<T>();
+    const len_type NB = cfg.gemm_nr.def<T>();
+    const len_type KB = cfg.gemm_kr.def<T>();
+
+    //block_scatter(comm, A, parent.rscat, MB, parent.rbs,
+    //                       parent.cscat, NB, parent.cbs);
+
+
+    at.fill_block_scatter(0, A_rscat, MB, A_rbs);
+    at.fill_block_scatter(1, A_cscat, KB, A_cbs);
+
+    bt.fill_block_scatter(0, B_rscat, KB, B_rbs);
+    bt.fill_block_scatter(1, B_cscat, NB, B_cbs);
+
+    ct.fill_block_scatter(0, C_rscat, MB, C_rbs);
+    ct.fill_block_scatter(1, C_cscat, NB, C_cbs);
+
+
+    //std::cout << "at.length(0):" << at.length(0) << std::endl;
+    //std::cout << "at.length(1):" << at.length(1) << std::endl;
+    //std::cout << "rscat:" << std::endl;
+    //for (unsigned i = 0; i < at.length(0); i++) {
+    //    std::cout << A_rscat[i] << " ";
+    //}
+    //std::cout << std::endl;
+    //std::cout << "cscat:" << std::endl;
+    //for (unsigned i = 0; i < at.length(1); i++) {
+    //    std::cout << A_cscat[i] << " ";
+    //}
+    //std::cout << std::endl;
+
+    //std::cout << "rbs:" << std::endl;
+    //for (unsigned i = 0; i < at.length(0); i++) {
+    //    std::cout << A_rbs[i] << " ";
+    //}
+    //std::cout << std::endl;
+    //std::cout << "cbs:" << std::endl;
+    //for (unsigned i = 0; i < at.length(1); i++) {
+    //    std::cout << A_cbs[i] << " ";
+    //}
+    //std::cout << std::endl;
+
+
+    //std::cout << "bt.length(0):" << bt.length(0) << std::endl;
+    //std::cout << "bt.length(1):" << bt.length(1) << std::endl;
+    //std::cout << "rscat:" << std::endl;
+    //for (unsigned i = 0; i < bt.length(0); i++) {
+    //    std::cout << B_rscat[i] << " ";
+    //}
+    //std::cout << std::endl;
+    //std::cout << "cscat:" << std::endl;
+    //for (unsigned i = 0; i < bt.length(1); i++) {
+    //    std::cout << B_cscat[i] << " ";
+    //}
+    //std::cout << std::endl;
+
+    //std::cout << "rbs:" << std::endl;
+    //for (unsigned i = 0; i < bt.length(0); i++) {
+    //    std::cout << B_rbs[i] << " ";
+    //}
+    //std::cout << std::endl;
+    //std::cout << "cbs:" << std::endl;
+    //for (unsigned i = 0; i < bt.length(1); i++) {
+    //    std::cout << B_cbs[i] << " ";
+    //}
+    //std::cout << std::endl;
+
+
+
+
+    //std::cout << "m: " << m << "; k:" << k << std::endl;
+
+
+    const T *buf_A0, *buf_A1, *buf_A2, *buf_A3;
+    stra_acquire_mpart( m, k, A_rscat, A_cscat, 2, 2, 0, 0, A, &buf_A0 );//i = at.length(0)/2, j = at.length(1)/2, buf = (at.data())[rs_c[i] + cs_c[j]]
+    stra_acquire_mpart( m, k, A_rscat, A_cscat, 2, 2, 0, 1, A, &buf_A1 );
+    stra_acquire_mpart( m, k, A_rscat, A_cscat, 2, 2, 1, 0, A, &buf_A2 );
+    stra_acquire_mpart( m, k, A_rscat, A_cscat, 2, 2, 1, 1, A, &buf_A3 );
+
+    //std::cout << "buf_A0[0]: " << buf_A0[0] << std::endl;
+    //std::cout << "buf_A1[0]: " << buf_A1[0] << std::endl;
+    //std::cout << "buf_A2[0]: " << buf_A2[0] << std::endl;
+    //std::cout << "buf_A3[0]: " << buf_A3[0] << std::endl;
+
+
+    const T *buf_B0, *buf_B1, *buf_B2, *buf_B3;
+    stra_acquire_mpart( k, n, B_rscat, B_cscat, 2, 2, 0, 0, B, &buf_B0 );
+    stra_acquire_mpart( k, n, B_rscat, B_cscat, 2, 2, 0, 1, B, &buf_B1 );
+    stra_acquire_mpart( k, n, B_rscat, B_cscat, 2, 2, 1, 0, B, &buf_B2 );
+    stra_acquire_mpart( k, n, B_rscat, B_cscat, 2, 2, 1, 1, B, &buf_B3 );
+
+    //std::cout << "buf_B0[0]: " << buf_B0[0] << std::endl;
+    //std::cout << "buf_B1[0]: " << buf_B1[0] << std::endl;
+    //std::cout << "buf_B2[0]: " << buf_B2[0] << std::endl;
+    //std::cout << "buf_B3[0]: " << buf_B3[0] << std::endl;
+
+
+    T *buf_C0, *buf_C1, *buf_C2, *buf_C3;
+    stra_acquire_mpart( m, n, C_rscat, C_cscat, 2, 2, 0, 0, C, &buf_C0 );
+    stra_acquire_mpart( m, n, C_rscat, C_cscat, 2, 2, 0, 1, C, &buf_C1 );
+    stra_acquire_mpart( m, n, C_rscat, C_cscat, 2, 2, 1, 0, C, &buf_C2 );
+    stra_acquire_mpart( m, n, C_rscat, C_cscat, 2, 2, 1, 1, C, &buf_C3 );
+
+    len_type ms = m/2, ks = k/2, ns = n/2;
+
+
+    // M0 = (1 * A_0 + 1 * A_3) * (1 * B_0 + 1 * B_3);  C_0 += 1 * M0;  C_3 += 1 * M0;
+    std::array<T*,2> A0_buf_list = {const_cast<T*>(A), const_cast<T*>(A)};
+    std::array<T,2> A0_coeff_list = {1, 1};
+    std::array<const stride_type*,2> A0_rscat_list = {A_rscat+0*ms, A_rscat+1*ms};
+    std::array<const stride_type*,2> A0_rbs_list = {A_rbs+0*ms/MB, A_rbs+1*ms/MB};
+    std::array<const stride_type*,2> A0_cscat_list = {A_cscat+0*ks, A_cscat+1*ks};
+    std::array<const stride_type*,2> A0_cbs_list = {A_cbs+0*ks/KB, A_cbs+1*ks/KB};
+    stra_block_scatter_matrix<T,2> Av0(ms, ks, A0_buf_list, A0_coeff_list, A0_rscat_list, MB, A0_rbs_list, A0_cscat_list, KB, A0_cbs_list);
+    std::array<T*,2> B0_buf_list = {const_cast<T*>(B), const_cast<T*>(B)};
+    std::array<T,2> B0_coeff_list = {1, 1};
+    std::array<const stride_type*,2> B0_rscat_list = {B_rscat+0*ks, B_rscat+1*ks};
+    std::array<const stride_type*,2> B0_rbs_list = {B_rbs+0*ks/KB, B_rbs+1*ks/KB};
+    std::array<const stride_type*,2> B0_cscat_list = {B_cscat+0*ns, B_cscat+1*ns};
+    std::array<const stride_type*,2> B0_cbs_list = {B_cbs+0*ns/NB, B_cbs+1*ns/NB};
+    stra_block_scatter_matrix<T,2> Bv0(ks, ns, B0_buf_list, B0_coeff_list, B0_rscat_list, KB, B0_rbs_list, B0_cscat_list, NB, B0_cbs_list);
+    std::array<T*,2> C0_buf_list = {const_cast<T*>(C), const_cast<T*>(C)};
+    std::array<T,2> C0_coeff_list = {1, 1};
+    std::array<const stride_type*,2> C0_rscat_list = {C_rscat+0*ms, C_rscat+1*ms};
+    std::array<const stride_type*,2> C0_rbs_list = {C_rbs+0*ms/MB, C_rbs+1*ms/MB};
+    std::array<const stride_type*,2> C0_cscat_list = {C_cscat+0*ns, C_cscat+1*ns};
+    std::array<const stride_type*,2> C0_cbs_list = {C_cbs+0*ns/NB, C_cbs+1*ns/NB};
+    stra_block_scatter_matrix<T,2> Cv0(ms, ns, C0_buf_list, C0_coeff_list, C0_rscat_list, MB, C0_rbs_list, C0_cscat_list, NB, C0_cbs_list);
+    //if (Cv0.stride(!row_major) == 1)
+    //{
+    //    Av0.transpose();
+    //    Bv0.transpose();
+    //    Cv0.transpose();
+    //    stra_gemm(comm, cfg, alpha, Bv0, Av0, beta, Cv0);
+    //} else {
+        stra_gemm(comm, cfg, alpha, Av0, Bv0, beta, Cv0);
+    //}
+    comm.barrier();
+    //std::cout << "stra_internal/stra_mult_M0:" << std::endl;
+    //print_tensor_matrix( ct );
+
+    // M1 = (1 * A_2 + 1 * A_3) * (1 * B_0);  C_2 += 1 * M1;  C_3 += -1 * M1;
+    std::array<T*,2> A1_buf_list = {const_cast<T*>(A), const_cast<T*>(A)};
+    std::array<T,2> A1_coeff_list = {1, 1};
+    std::array<const stride_type*,2> A1_rscat_list = {A_rscat+1*ms, A_rscat+1*ms};
+    std::array<const stride_type*,2> A1_rbs_list = {A_rbs+1*ms/MB, A_rbs+1*ms/MB};
+    std::array<const stride_type*,2> A1_cscat_list = {A_cscat+0*ks, A_cscat+1*ks};
+    std::array<const stride_type*,2> A1_cbs_list = {A_cbs+0*ks/KB, A_cbs+1*ks/KB};
+    stra_block_scatter_matrix<T,2> Av1(ms, ks, A1_buf_list, A1_coeff_list, A1_rscat_list, MB, A1_rbs_list, A1_cscat_list, KB, A1_cbs_list);
+    std::array<T*,1> B1_buf_list = {const_cast<T*>(B)};
+    std::array<T,1> B1_coeff_list = {1};
+    std::array<const stride_type*,1> B1_rscat_list = {B_rscat+0*ks};
+    std::array<const stride_type*,1> B1_rbs_list = {B_rbs+0*ks/KB};
+    std::array<const stride_type*,1> B1_cscat_list = {B_cscat+0*ns};
+    std::array<const stride_type*,1> B1_cbs_list = {B_cbs+0*ns/NB};
+    stra_block_scatter_matrix<T,1> Bv1(ks, ns, B1_buf_list, B1_coeff_list, B1_rscat_list, KB, B1_rbs_list, B1_cscat_list, NB, B1_cbs_list);
+    std::array<T*,2> C1_buf_list = {const_cast<T*>(C), const_cast<T*>(C)};
+    std::array<T,2> C1_coeff_list = {1, -1};
+    std::array<const stride_type*,2> C1_rscat_list = {C_rscat+1*ms, C_rscat+1*ms};
+    std::array<const stride_type*,2> C1_rbs_list = {C_rbs+1*ms/MB, C_rbs+1*ms/MB};
+    std::array<const stride_type*,2> C1_cscat_list = {C_cscat+0*ns, C_cscat+1*ns};
+    std::array<const stride_type*,2> C1_cbs_list = {C_cbs+0*ns/NB, C_cbs+1*ns/NB};
+    stra_block_scatter_matrix<T,2> Cv1(ms, ns, C1_buf_list, C1_coeff_list, C1_rscat_list, MB, C1_rbs_list, C1_cscat_list, NB, C1_cbs_list);
+    //if (Cv1.stride(!row_major) == 1)
+    //{
+    //    Av1.transpose();
+    //    Bv1.transpose();
+    //    Cv1.transpose();
+    //    stra_gemm(comm, cfg, alpha, Bv1, Av1, beta, Cv1);
+    //} else {
+        stra_gemm(comm, cfg, alpha, Av1, Bv1, beta, Cv1);
+    //}
+    comm.barrier();
+    //std::cout << "stra_internal/stra_mult_M1:" << std::endl;
+    //print_tensor_matrix( ct );
+
+    // M2 = (1 * A_0) * (1 * B_1 + -1 * B_3);  C_1 += 1 * M2;  C_3 += 1 * M2;
+    std::array<T*,1> A2_buf_list = {const_cast<T*>(A)};
+    std::array<T,1> A2_coeff_list = {1};
+    std::array<const stride_type*,1> A2_rscat_list = {A_rscat+0*ms};
+    std::array<const stride_type*,1> A2_rbs_list = {A_rbs+0*ms/MB};
+    std::array<const stride_type*,1> A2_cscat_list = {A_cscat+0*ks};
+    std::array<const stride_type*,1> A2_cbs_list = {A_cbs+0*ks/KB};
+    stra_block_scatter_matrix<T,1> Av2(ms, ks, A2_buf_list, A2_coeff_list, A2_rscat_list, MB, A2_rbs_list, A2_cscat_list, KB, A2_cbs_list);
+    std::array<T*,2> B2_buf_list = {const_cast<T*>(B), const_cast<T*>(B)};
+    std::array<T,2> B2_coeff_list = {1, -1};
+    std::array<const stride_type*,2> B2_rscat_list = {B_rscat+0*ks, B_rscat+1*ks};
+    std::array<const stride_type*,2> B2_rbs_list = {B_rbs+0*ks/KB, B_rbs+1*ks/KB};
+    std::array<const stride_type*,2> B2_cscat_list = {B_cscat+1*ns, B_cscat+1*ns};
+    std::array<const stride_type*,2> B2_cbs_list = {B_cbs+1*ns/NB, B_cbs+1*ns/NB};
+    stra_block_scatter_matrix<T,2> Bv2(ks, ns, B2_buf_list, B2_coeff_list, B2_rscat_list, KB, B2_rbs_list, B2_cscat_list, NB, B2_cbs_list);
+    std::array<T*,2> C2_buf_list = {const_cast<T*>(C), const_cast<T*>(C)};
+    std::array<T,2> C2_coeff_list = {1, 1};
+    std::array<const stride_type*,2> C2_rscat_list = {C_rscat+0*ms, C_rscat+1*ms};
+    std::array<const stride_type*,2> C2_rbs_list = {C_rbs+0*ms/MB, C_rbs+1*ms/MB};
+    std::array<const stride_type*,2> C2_cscat_list = {C_cscat+1*ns, C_cscat+1*ns};
+    std::array<const stride_type*,2> C2_cbs_list = {C_cbs+1*ns/NB, C_cbs+1*ns/NB};
+    stra_block_scatter_matrix<T,2> Cv2(ms, ns, C2_buf_list, C2_coeff_list, C2_rscat_list, MB, C2_rbs_list, C2_cscat_list, NB, C2_cbs_list);
+    //if (Cv2.stride(!row_major) == 1)
+    //{
+    //    Av2.transpose();
+    //    Bv2.transpose();
+    //    Cv2.transpose();
+    //    stra_gemm(comm, cfg, alpha, Bv2, Av2, beta, Cv2);
+    //} else {
+        stra_gemm(comm, cfg, alpha, Av2, Bv2, beta, Cv2);
+    //}
+    comm.barrier();
+    //std::cout << "stra_internal/stra_mult_M2:" << std::endl;
+    //print_tensor_matrix( ct );
+
+    // M3 = (1 * A_3) * (-1 * B_0 + 1 * B_2);  C_0 += 1 * M3;  C_2 += 1 * M3;
+    std::array<T*,1> A3_buf_list = {const_cast<T*>(A)};
+    std::array<T,1> A3_coeff_list = {1};
+    std::array<const stride_type*,1> A3_rscat_list = {A_rscat+1*ms};
+    std::array<const stride_type*,1> A3_rbs_list = {A_rbs+1*ms/MB};
+    std::array<const stride_type*,1> A3_cscat_list = {A_cscat+1*ks};
+    std::array<const stride_type*,1> A3_cbs_list = {A_cbs+1*ks/KB};
+    stra_block_scatter_matrix<T,1> Av3(ms, ks, A3_buf_list, A3_coeff_list, A3_rscat_list, MB, A3_rbs_list, A3_cscat_list, KB, A3_cbs_list);
+    std::array<T*,2> B3_buf_list = {const_cast<T*>(B), const_cast<T*>(B)};
+    std::array<T,2> B3_coeff_list = {-1, 1};
+    std::array<const stride_type*,2> B3_rscat_list = {B_rscat+0*ks, B_rscat+1*ks};
+    std::array<const stride_type*,2> B3_rbs_list = {B_rbs+0*ks/KB, B_rbs+1*ks/KB};
+    std::array<const stride_type*,2> B3_cscat_list = {B_cscat+0*ns, B_cscat+0*ns};
+    std::array<const stride_type*,2> B3_cbs_list = {B_cbs+0*ns/NB, B_cbs+0*ns/NB};
+    stra_block_scatter_matrix<T,2> Bv3(ks, ns, B3_buf_list, B3_coeff_list, B3_rscat_list, KB, B3_rbs_list, B3_cscat_list, NB, B3_cbs_list);
+    std::array<T*,2> C3_buf_list = {const_cast<T*>(C), const_cast<T*>(C)};
+    std::array<T,2> C3_coeff_list = {1, 1};
+    std::array<const stride_type*,2> C3_rscat_list = {C_rscat+0*ms, C_rscat+1*ms};
+    std::array<const stride_type*,2> C3_rbs_list = {C_rbs+0*ms/MB, C_rbs+1*ms/MB};
+    std::array<const stride_type*,2> C3_cscat_list = {C_cscat+0*ns, C_cscat+0*ns};
+    std::array<const stride_type*,2> C3_cbs_list = {C_cbs+0*ns/NB, C_cbs+0*ns/NB};
+    stra_block_scatter_matrix<T,2> Cv3(ms, ns, C3_buf_list, C3_coeff_list, C3_rscat_list, MB, C3_rbs_list, C3_cscat_list, NB, C3_cbs_list);
+    //if (Cv3.stride(!row_major) == 1)
+    //{
+    //    Av3.transpose();
+    //    Bv3.transpose();
+    //    Cv3.transpose();
+    //    stra_gemm(comm, cfg, alpha, Bv3, Av3, beta, Cv3);
+    //} else {
+        stra_gemm(comm, cfg, alpha, Av3, Bv3, beta, Cv3);
+    //}
+    comm.barrier();
+    //std::cout << "stra_internal/stra_mult_M3:" << std::endl;
+    //print_tensor_matrix( ct );
+
+    // M4 = (1 * A_0 + 1 * A_1) * (1 * B_3);  C_0 += -1 * M4;  C_1 += 1 * M4;
+    std::array<T*,2> A4_buf_list = {const_cast<T*>(A), const_cast<T*>(A)};
+    std::array<T,2> A4_coeff_list = {1, 1};
+    std::array<const stride_type*,2> A4_rscat_list = {A_rscat+0*ms, A_rscat+0*ms};
+    std::array<const stride_type*,2> A4_rbs_list = {A_rbs+0*ms/MB, A_rbs+0*ms/MB};
+    std::array<const stride_type*,2> A4_cscat_list = {A_cscat+0*ks, A_cscat+1*ks};
+    std::array<const stride_type*,2> A4_cbs_list = {A_cbs+0*ks/KB, A_cbs+1*ks/KB};
+    stra_block_scatter_matrix<T,2> Av4(ms, ks, A4_buf_list, A4_coeff_list, A4_rscat_list, MB, A4_rbs_list, A4_cscat_list, KB, A4_cbs_list);
+    std::array<T*,1> B4_buf_list = {const_cast<T*>(B)};
+    std::array<T,1> B4_coeff_list = {1};
+    std::array<const stride_type*,1> B4_rscat_list = {B_rscat+1*ks};
+    std::array<const stride_type*,1> B4_rbs_list = {B_rbs+1*ks/KB};
+    std::array<const stride_type*,1> B4_cscat_list = {B_cscat+1*ns};
+    std::array<const stride_type*,1> B4_cbs_list = {B_cbs+1*ns/NB};
+    stra_block_scatter_matrix<T,1> Bv4(ks, ns, B4_buf_list, B4_coeff_list, B4_rscat_list, KB, B4_rbs_list, B4_cscat_list, NB, B4_cbs_list);
+    std::array<T*,2> C4_buf_list = {const_cast<T*>(C), const_cast<T*>(C)};
+    std::array<T,2> C4_coeff_list = {-1, 1};
+    std::array<const stride_type*,2> C4_rscat_list = {C_rscat+0*ms, C_rscat+0*ms};
+    std::array<const stride_type*,2> C4_rbs_list = {C_rbs+0*ms/MB, C_rbs+0*ms/MB};
+    std::array<const stride_type*,2> C4_cscat_list = {C_cscat+0*ns, C_cscat+1*ns};
+    std::array<const stride_type*,2> C4_cbs_list = {C_cbs+0*ns/NB, C_cbs+1*ns/NB};
+    stra_block_scatter_matrix<T,2> Cv4(ms, ns, C4_buf_list, C4_coeff_list, C4_rscat_list, MB, C4_rbs_list, C4_cscat_list, NB, C4_cbs_list);
+    //if (Cv4.stride(!row_major) == 1)
+    //{
+    //    Av4.transpose();
+    //    Bv4.transpose();
+    //    Cv4.transpose();
+    //    stra_gemm(comm, cfg, alpha, Bv4, Av4, beta, Cv4);
+    //} else {
+        stra_gemm(comm, cfg, alpha, Av4, Bv4, beta, Cv4);
+    //}
+    comm.barrier();
+    //std::cout << "stra_internal/stra_mult_M4:" << std::endl;
+    //print_tensor_matrix( ct );
+
+    // M5 = (-1 * A_0 + 1 * A_2) * (1 * B_0 + 1 * B_1);  C_3 += 1 * M5;
+    std::array<T*,2> A5_buf_list = {const_cast<T*>(A), const_cast<T*>(A)};
+    std::array<T,2> A5_coeff_list = {-1, 1};
+    std::array<const stride_type*,2> A5_rscat_list = {A_rscat+0*ms, A_rscat+1*ms};
+    std::array<const stride_type*,2> A5_rbs_list = {A_rbs+0*ms/MB, A_rbs+1*ms/MB};
+    std::array<const stride_type*,2> A5_cscat_list = {A_cscat+0*ks, A_cscat+0*ks};
+    std::array<const stride_type*,2> A5_cbs_list = {A_cbs+0*ks/KB, A_cbs+0*ks/KB};
+    stra_block_scatter_matrix<T,2> Av5(ms, ks, A5_buf_list, A5_coeff_list, A5_rscat_list, MB, A5_rbs_list, A5_cscat_list, KB, A5_cbs_list);
+    std::array<T*,2> B5_buf_list = {const_cast<T*>(B), const_cast<T*>(B)};
+    std::array<T,2> B5_coeff_list = {1, 1};
+    std::array<const stride_type*,2> B5_rscat_list = {B_rscat+0*ks, B_rscat+0*ks};
+    std::array<const stride_type*,2> B5_rbs_list = {B_rbs+0*ks/KB, B_rbs+0*ks/KB};
+    std::array<const stride_type*,2> B5_cscat_list = {B_cscat+0*ns, B_cscat+1*ns};
+    std::array<const stride_type*,2> B5_cbs_list = {B_cbs+0*ns/NB, B_cbs+1*ns/NB};
+    stra_block_scatter_matrix<T,2> Bv5(ks, ns, B5_buf_list, B5_coeff_list, B5_rscat_list, KB, B5_rbs_list, B5_cscat_list, NB, B5_cbs_list);
+    std::array<T*,1> C5_buf_list = {const_cast<T*>(C)};
+    std::array<T,1> C5_coeff_list = {1};
+    std::array<const stride_type*,1> C5_rscat_list = {C_rscat+1*ms};
+    std::array<const stride_type*,1> C5_rbs_list = {C_rbs+1*ms/MB};
+    std::array<const stride_type*,1> C5_cscat_list = {C_cscat+1*ns};
+    std::array<const stride_type*,1> C5_cbs_list = {C_cbs+1*ns/NB};
+    stra_block_scatter_matrix<T,1> Cv5(ms, ns, C5_buf_list, C5_coeff_list, C5_rscat_list, MB, C5_rbs_list, C5_cscat_list, NB, C5_cbs_list);
+    //if (Cv5.stride(!row_major) == 1)
+    //{
+    //    Av5.transpose();
+    //    Bv5.transpose();
+    //    Cv5.transpose();
+    //    stra_gemm(comm, cfg, alpha, Bv5, Av5, beta, Cv5);
+    //} else {
+        stra_gemm(comm, cfg, alpha, Av5, Bv5, beta, Cv5);
+    //}
+    comm.barrier();
+    //std::cout << "stra_internal/stra_mult_M5:" << std::endl;
+    //print_tensor_matrix( ct );
+
+    // M6 = (1 * A_1 + -1 * A_3) * (1 * B_2 + 1 * B_3);  C_0 += 1 * M6;
+    std::array<T*,2> A6_buf_list = {const_cast<T*>(A), const_cast<T*>(A)};
+    std::array<T,2> A6_coeff_list = {1, -1};
+    std::array<const stride_type*,2> A6_rscat_list = {A_rscat+0*ms, A_rscat+1*ms};
+    std::array<const stride_type*,2> A6_rbs_list = {A_rbs+0*ms/MB, A_rbs+1*ms/MB};
+    std::array<const stride_type*,2> A6_cscat_list = {A_cscat+1*ks, A_cscat+1*ks};
+    std::array<const stride_type*,2> A6_cbs_list = {A_cbs+1*ks/KB, A_cbs+1*ks/KB};
+    stra_block_scatter_matrix<T,2> Av6(ms, ks, A6_buf_list, A6_coeff_list, A6_rscat_list, MB, A6_rbs_list, A6_cscat_list, KB, A6_cbs_list);
+    std::array<T*,2> B6_buf_list = {const_cast<T*>(B), const_cast<T*>(B)};
+    std::array<T,2> B6_coeff_list = {1, 1};
+    std::array<const stride_type*,2> B6_rscat_list = {B_rscat+1*ks, B_rscat+1*ks};
+    std::array<const stride_type*,2> B6_rbs_list = {B_rbs+1*ks/KB, B_rbs+1*ks/KB};
+    std::array<const stride_type*,2> B6_cscat_list = {B_cscat+0*ns, B_cscat+1*ns};
+    std::array<const stride_type*,2> B6_cbs_list = {B_cbs+0*ns/NB, B_cbs+1*ns/NB};
+    stra_block_scatter_matrix<T,2> Bv6(ks, ns, B6_buf_list, B6_coeff_list, B6_rscat_list, KB, B6_rbs_list, B6_cscat_list, NB, B6_cbs_list);
+    std::array<T*,1> C6_buf_list = {const_cast<T*>(C)};
+    std::array<T,1> C6_coeff_list = {1};
+    std::array<const stride_type*,1> C6_rscat_list = {C_rscat+0*ms};
+    std::array<const stride_type*,1> C6_rbs_list = {C_rbs+0*ms/MB};
+    std::array<const stride_type*,1> C6_cscat_list = {C_cscat+0*ns};
+    std::array<const stride_type*,1> C6_cbs_list = {C_cbs+0*ns/NB};
+    stra_block_scatter_matrix<T,1> Cv6(ms, ns, C6_buf_list, C6_coeff_list, C6_rscat_list, MB, C6_rbs_list, C6_cscat_list, NB, C6_cbs_list);
+    //if (Cv6.stride(!row_major) == 1)
+    //{
+    //    Av6.transpose();
+    //    Bv6.transpose();
+    //    Cv6.transpose();
+    //    stra_gemm(comm, cfg, alpha, Bv6, Av6, beta, Cv6);
+    //} else {
+        stra_gemm(comm, cfg, alpha, Av6, Bv6, beta, Cv6);
+    //}
+    comm.barrier();
+    //std::cout << "stra_internal/stra_mult_M6:" << std::endl;
+    //print_tensor_matrix( ct );
+
+
+
+    ////buf_list[N], buf_list
+    ////buf_list = {buf_A[0], buf_A[3]}
+
+    //len_type offm1, offm2, offn1, offn2;
+    //std::array<T*,2> buf_list;
+    //std::array<T,2> coeff_list;
+    //len_type ms = m/2, ks = k/2, ns = n/2;
+
+    ////std::cout << "ms: " << ms << "; ks: " << ks << "; ns: " << ns << std::endl;
+
+    //// M0 = (1 * A_0 + 1 * A_3) * (1 * B_0 + 1 * B_3);  C_0 += 1 * M0;  C_3 += 1 * M0;
+
+    //offm1 = 0, offn1 = 0;
+    //offm2 = ms, offn2 = ks;
+    ////buf_list = {const_cast<T*>(buf_A0), const_cast<T*>(buf_A3)};
+    //buf_list = {const_cast<T*>(buf_A0), const_cast<T*>(buf_A0)};
+    //coeff_list = {1,1};
+    //std::array<const stride_type*,2> at_rscat_list = {const_cast<stride_type*>(at_rscat+offm1), const_cast<stride_type*>(at_rscat+offm2)};
+    //std::array<const stride_type*,2> at_rbs_list = {at_rbs+offm1/MB, at_rbs+offm2/MB};
+    //std::array<const stride_type*,2> at_cscat_list = {at_cscat+offn1, at_cscat+offn2};
+    //std::array<const stride_type*,2> at_cbs_list = {at_cbs+offn1/NB, at_cbs+offn2/NB};
+    //stra_block_scatter_matrix<T,2> Av0(ms, ks,
+    //        buf_list, coeff_list,
+    //        at_rscat_list, MB, at_rbs_list,
+    //        at_cscat_list, NB, at_cbs_list);
+
+
+    ////stra_block_scatter_matrix<T, stra_size(A) > M(A.length(0), A.length(1), buf, coeff,//A.data_list(),
+    ////        parent.rscat, MB, parent.rbs,
+    ////        parent.cscat, NB, parent.cbs);
+
+    //offm1 = 0, offn1 = 0;
+    //offm2 = ks, offn2 = ns;
+    ////buf_list = {const_cast<T*>(buf_B0), const_cast<T*>(buf_B3)};
+    //buf_list = {const_cast<T*>(buf_B0), const_cast<T*>(buf_B0)};
+    //coeff_list = {1,1};
+    //std::array<const stride_type*,2> bt_rscat_list = {bt_rscat+offm1, bt_rscat+offm2};
+    //std::array<const stride_type*,2> bt_rbs_list = {bt_rbs+offm1/MB, bt_rbs+offm2/MB};
+    //std::array<const stride_type*,2> bt_cscat_list = {bt_cscat+offn1, bt_cscat+offn2};
+    //std::array<const stride_type*,2> bt_cbs_list = {bt_cbs+offn1/NB, bt_cbs+offn2/NB};
+    //stra_block_scatter_matrix<T,2> Bv0(ks, ns,
+    //        buf_list, coeff_list,
+    //        bt_rscat_list, MB, bt_rbs_list,
+    //        bt_cscat_list, NB, bt_cbs_list);
+
+
+    //offm1 = 0, offn1 = 0;
+    //offm2 = ms, offn2 = ns;
+    ////buf_list = {const_cast<T*>(buf_C0), const_cast<T*>(buf_C3)};
+    //buf_list = {const_cast<T*>(buf_C0), const_cast<T*>(buf_C0)};
+    //coeff_list = {1,1};
+    //std::array<const stride_type*,2> ct_rscat_list = {ct_rscat+offm1, ct_rscat+offm2};
+    //std::array<const stride_type*,2> ct_rbs_list = {ct_rbs+offm1/MB, ct_rbs+offm2/MB};
+    //std::array<const stride_type*,2> ct_cscat_list = {ct_cscat+offn1, ct_cscat+offn2};
+    //std::array<const stride_type*,2> ct_cbs_list = {ct_cbs+offn1/NB, ct_cbs+offn2/NB};
+    //stra_block_scatter_matrix<T,2> Cv0(ms, ns,
+    //        buf_list, coeff_list,
+    //        ct_rscat_list, MB, ct_rbs_list,
+    //        ct_cscat_list, NB, ct_cbs_list);
+
+    ////std::cout << "Before stra_gemm" << std::endl;
+
+    //stra_gemm(comm, cfg, alpha, Av0, Bv0, beta, Cv0);
+    //comm.barrier();
+
+    //std::cout << "After stra_gemm" << std::endl;
+
+    //std::cout << "stra_internal/stra_mult_M0:" << std::endl;
+    //print_tensor_matrix( ct );
+
+
+
+
+    //std::cout << "stra_internal/stra_mult_A:" << std::endl;
+    //print_tensor_matrix( at );
+
+    //std::cout << "stra_internal/stra_mult_B:" << std::endl;
+    //print_tensor_matrix( bt );
+
+    //std::cout << "stra_internal/stra_mult_M6:" << std::endl;
+    //print_tensor_matrix( ct );
+
+}
+
+#define INSTANTIATE_CONTRACT_BLIS(T) \
+template void stra_contract_blis(const communicator& comm, const config& cfg, \
+                                 const std::vector<len_type>& len_AB, \
+                                 const std::vector<len_type>& len_AC, \
+                                 const std::vector<len_type>& len_BC, \
+                                 T alpha, const T* A, \
+                                 const std::vector<stride_type>& stride_A_AB, \
+                                 const std::vector<stride_type>& stride_A_AC, \
+                                          const T* B, \
+                                 const std::vector<stride_type>& stride_B_AB, \
+                                 const std::vector<stride_type>& stride_B_BC, \
+                                 T  beta,       T* C, \
+                                 const std::vector<stride_type>& stride_C_AC, \
+                                 const std::vector<stride_type>& stride_C_BC);
+
+INSTANTIATE_CONTRACT_BLIS(float);
+INSTANTIATE_CONTRACT_BLIS(double);
+INSTANTIATE_CONTRACT_BLIS(scomplex);
+INSTANTIATE_CONTRACT_BLIS(dcomplex);
+
+template <typename T>
+void stra_mult_blas(const communicator& comm, const config& cfg,
+                    const std::vector<len_type>& len_A,
+                    const std::vector<len_type>& len_B,
+                    const std::vector<len_type>& len_C,
+                    const std::vector<len_type>& len_AB,
+                    const std::vector<len_type>& len_AC,
+                    const std::vector<len_type>& len_BC,
+                    const std::vector<len_type>& len_ABC,
+                    T alpha, const T* A,
+                    const std::vector<stride_type>& stride_A_A,
+                    const std::vector<stride_type>& stride_A_AB,
+                    const std::vector<stride_type>& stride_A_AC,
+                    const std::vector<stride_type>& stride_A_ABC,
+                             const T* B,
+                    const std::vector<stride_type>& stride_B_B,
+                    const std::vector<stride_type>& stride_B_AB,
+                    const std::vector<stride_type>& stride_B_BC,
+                    const std::vector<stride_type>& stride_B_ABC,
+                    T  beta,       T* C,
+                    const std::vector<stride_type>& stride_C_C,
+                    const std::vector<stride_type>& stride_C_AC,
+                    const std::vector<stride_type>& stride_C_BC,
+                    const std::vector<stride_type>& stride_C_ABC)
+{
+    tensor<T> ar, br, cr;
+    T* ptrs_local[3];
+    T** ptrs = &ptrs_local[0];
+
+    if (comm.master())
+    {
+        ar.reset(len_AC+len_AB);
+        br.reset(len_AB+len_BC);
+        cr.reset(len_AC+len_BC);
+        ptrs[0] = ar.data();
+        ptrs[1] = br.data();
+        ptrs[2] = cr.data();
+    }
+
+    comm.broadcast(ptrs);
+
+    tensor_view<T> arv(len_AC+len_AB, ptrs[0]);
+    tensor_view<T> brv(len_AB+len_BC, ptrs[1]);
+    tensor_view<T> crv(len_AC+len_BC, ptrs[2]);
+
+    matrix_view<T> am, bm, cm;
+    matricize<T>(arv, am, static_cast<unsigned>(len_AC.size()));
+    matricize<T>(brv, bm, static_cast<unsigned>(len_AB.size()));
+    matricize<T>(crv, cm, static_cast<unsigned>(len_AC.size()));
+
+    MArray::viterator<3> it(len_ABC, stride_A_ABC, stride_B_ABC, stride_C_ABC);
+
+    while (it.next(A, B, C))
+    {
+        add(comm, cfg, len_A, {}, arv.lengths(),
+            T(1), false,          A, stride_A_A, stride_A_AC+stride_A_AB,
+            T(0), false, arv.data(),         {},           arv.strides());
+
+        add(comm, cfg, len_B, {}, brv.lengths(),
+            T(1), false,          B, stride_B_B, stride_B_AB+stride_B_BC,
+            T(0), false, brv.data(),         {},           brv.strides());
+
+        stra_mult(comm, cfg, cm.length(0), cm.length(1), am.length(1),
+                  alpha, false, am.data(), am.stride(0), am.stride(1),
+                         false, bm.data(), bm.stride(0), bm.stride(1),
+                   T(0), false, cm.data(), cm.stride(0), cm.stride(1));
+
+        add(comm, cfg, {}, len_C, crv.lengths(),
+            T(1), false, crv.data(),         {},            crv.strides(),
+            beta, false,          C, stride_C_C, stride_C_AC+stride_C_BC);
+    }
+}
+
+template <typename T>
+void stra_mult_ref(const communicator& comm, const config& cfg,
+                   const std::vector<len_type>& len_A,
+                   const std::vector<len_type>& len_B,
+                   const std::vector<len_type>& len_C,
+                   const std::vector<len_type>& len_AB,
+                   const std::vector<len_type>& len_AC,
+                   const std::vector<len_type>& len_BC,
+                   const std::vector<len_type>& len_ABC,
+                   T alpha, const T* A,
+                   const std::vector<stride_type>& stride_A_A,
+                   const std::vector<stride_type>& stride_A_AB,
+                   const std::vector<stride_type>& stride_A_AC,
+                   const std::vector<stride_type>& stride_A_ABC,
+                            const T* B,
+                   const std::vector<stride_type>& stride_B_B,
+                   const std::vector<stride_type>& stride_B_AB,
+                   const std::vector<stride_type>& stride_B_BC,
+                   const std::vector<stride_type>& stride_B_ABC,
+                   T  beta,       T* C,
+                   const std::vector<stride_type>& stride_C_C,
+                   const std::vector<stride_type>& stride_C_AC,
+                   const std::vector<stride_type>& stride_C_BC,
+                   const std::vector<stride_type>& stride_C_ABC)
+{
+    (void)cfg;
+
+    MArray::viterator<1> iter_A(len_A, stride_A_A);
+    MArray::viterator<1> iter_B(len_B, stride_B_B);
+    MArray::viterator<1> iter_C(len_C, stride_C_C);
+    MArray::viterator<2> iter_AB(len_AB, stride_A_AB, stride_B_AB);
+    MArray::viterator<2> iter_AC(len_AC, stride_A_AC, stride_C_AC);
+    MArray::viterator<2> iter_BC(len_BC, stride_B_BC, stride_C_BC);
+    MArray::viterator<3> iter_ABC(len_ABC, stride_A_ABC, stride_B_ABC, stride_C_ABC);
+    len_type n = stl_ext::prod(len_ABC);
+
+    len_type n_min, n_max;
+    std::tie(n_min, n_max, std::ignore) = comm.distribute_over_threads(n);
+
+    iter_ABC.position(n_min, A, B, C);
+
+    for (len_type i = n_min;i < n_max;i++)
+    {
+        iter_ABC.next(A, B, C);
+
+        while (iter_AC.next(A, C))
+        {
+            while (iter_BC.next(B, C))
+            {
+                T temp = T();
+
+                while (iter_AB.next(A, B))
+                {
+                    T temp_A = T();
+                    while (iter_A.next(A))
+                    {
+                        temp_A += *A;
+                    }
+
+                    T temp_B = T();
+                    while (iter_B.next(B))
+                    {
+                        temp_B += *B;
+                    }
+
+                    temp += temp_A*temp_B;
+                }
+
+                temp *= alpha;
+
+                if (beta == T(0))
+                {
+                    while (iter_C.next(C))
+                    {
+                        *C = temp;
+                    }
+                }
+                else
+                {
+                    while (iter_C.next(C))
+                    {
+                        *C = temp + beta*(*C);
+                    }
+                }
+            }
+        }
+    }
+}
+
+template <typename T>
+void stra_outer_prod_blas(const communicator& comm, const config& cfg,
+                          const std::vector<len_type>& len_AC,
+                          const std::vector<len_type>& len_BC,
+                          T alpha, const T* A,
+                          const std::vector<stride_type>& stride_A_AC,
+                                   const T* B,
+                          const std::vector<stride_type>& stride_B_BC,
+                          T  beta,       T* C,
+                          const std::vector<stride_type>& stride_C_AC,
+                          const std::vector<stride_type>& stride_C_BC)
+{
+    tensor<T> ar, br, cr;
+    T* ptrs_local[3];
+    T** ptrs = &ptrs_local[0];
+
+    if (comm.master())
+    {
+        ar.reset(len_AC);
+        br.reset(len_BC);
+        cr.reset(len_AC+len_BC);
+        ptrs[0] = ar.data();
+        ptrs[1] = br.data();
+        ptrs[2] = cr.data();
+    }
+
+    comm.broadcast(ptrs);
+
+    tensor_view<T> arv(len_AC, ptrs[0]);
+    tensor_view<T> brv(len_BC, ptrs[1]);
+    tensor_view<T> crv(len_AC+len_BC, ptrs[2]);
+
+    matrix_view<T> am, bm, cm;
+    matricize<T>(arv, am, static_cast<unsigned>(len_AC.size()));
+    matricize<T>(brv, bm, 0);
+    matricize<T>(crv, cm, static_cast<unsigned>(len_AC.size()));
+
+    add(comm, cfg, {}, {}, arv.lengths(),
+        T(1), false,          A, {},   stride_A_AC,
+        T(0), false, arv.data(), {}, arv.strides());
+
+    add(comm, cfg, {}, {}, brv.lengths(),
+        T(1), false,          B, {},   stride_B_BC,
+        T(0), false, brv.data(), {}, brv.strides());
+
+    stra_mult(comm, cfg, cm.length(0), cm.length(1), am.length(1),
+             alpha, false, am.data(), am.stride(0), am.stride(1),
+                    false, bm.data(), bm.stride(0), bm.stride(1),
+              T(0), false, cm.data(), cm.stride(0), cm.stride(1));
+
+    add(comm, cfg, {}, {}, crv.lengths(),
+        T(1), false, crv.data(), {},            crv.strides(),
+        beta, false,          C, {}, stride_C_AC+stride_C_BC);
+}
+
+template <typename T>
+void stra_outer_prod_ref(const communicator& comm, const config& cfg,
+                         const std::vector<len_type>& len_AC,
+                         const std::vector<len_type>& len_BC,
+                         T alpha, const T* A,
+                         const std::vector<stride_type>& stride_A_AC,
+                                  const T* B,
+                         const std::vector<stride_type>& stride_B_BC,
+                         T  beta,       T* C,
+                         const std::vector<stride_type>& stride_C_AC,
+                         const std::vector<stride_type>& stride_C_BC)
+{
+    (void)cfg;
+
+    MArray::viterator<2> iter_AC(len_AC, stride_A_AC, stride_C_AC);
+    MArray::viterator<2> iter_BC(len_BC, stride_B_BC, stride_C_BC);
+    len_type m = stl_ext::prod(len_AC);
+    len_type n = stl_ext::prod(len_BC);
+
+    len_type m_min, m_max, n_min, n_max;
+    std::tie(m_min, m_max, std::ignore,
+             n_min, n_max, std::ignore) = comm.distribute_over_threads_2d(m, n);
+
+    const T* A0 = A;
+    const T* B0 = B;
+          T* C0 = C;
+
+    iter_AC.position(m_min, A0, C0);
+
+    for (len_type i = m_min;i < m_max;i++)
+    {
+        iter_AC.next(A0, C0);
+
+        A = A0;
+        B = B0;
+        C = C0;
+
+        iter_BC.position(n_min, B, C);
+
+        if (beta == T(0))
+        {
+            for (len_type j = n_min;j < n_max;j++)
+            {
+                iter_BC.next(B, C);
+                *C = alpha*(*A)*(*B);
+            }
+        }
+        else
+        {
+            for (len_type j = n_min;j < n_max;j++)
+            {
+                iter_BC.next(B, C);
+                *C = alpha*(*A)*(*B) + beta*(*C);
+            }
+        }
+    }
+}
+
+template <typename T>
+void stra_weight_blas(const communicator& comm, const config& cfg,
+                      const std::vector<len_type>& len_AC,
+                      const std::vector<len_type>& len_BC,
+                      const std::vector<len_type>& len_ABC,
+                      T alpha, const T* A,
+                      const std::vector<stride_type>& stride_A_AC,
+                      const std::vector<stride_type>& stride_A_ABC,
+                               const T* B,
+                      const std::vector<stride_type>& stride_B_BC,
+                      const std::vector<stride_type>& stride_B_ABC,
+                      T  beta,       T* C,
+                      const std::vector<stride_type>& stride_C_AC,
+                      const std::vector<stride_type>& stride_C_BC,
+                      const std::vector<stride_type>& stride_C_ABC)
+{
+    tensor<T> ar, br, cr;
+    T* ptrs_local[3];
+    T** ptrs = &ptrs_local[0];
+
+    if (comm.master())
+    {
+        ar.reset(len_AC);
+        br.reset(len_BC);
+        cr.reset(len_AC+len_BC);
+        ptrs[0] = ar.data();
+        ptrs[1] = br.data();
+        ptrs[2] = cr.data();
+    }
+
+    comm.broadcast(ptrs);
+
+    tensor_view<T> arv(len_AC, ptrs[0]);
+    tensor_view<T> brv(len_BC, ptrs[1]);
+    tensor_view<T> crv(len_AC+len_BC, ptrs[2]);
+
+    matrix_view<T> am, bm, cm;
+    matricize<T>(arv, am, static_cast<unsigned>(len_AC.size()));
+    matricize<T>(brv, bm, 0);
+    matricize<T>(crv, cm, static_cast<unsigned>(len_AC.size()));
+
+    MArray::viterator<3> it(len_ABC, stride_A_ABC, stride_B_ABC, stride_C_ABC);
+
+    while (it.next(A, B, C))
+    {
+        add(comm, cfg, {}, {}, arv.lengths(),
+            T(1), false,          A, {},   stride_A_AC,
+            T(0), false, arv.data(), {}, arv.strides());
+
+        add(comm, cfg, {}, {}, brv.lengths(),
+            T(1), false,          B, {},   stride_B_BC,
+            T(0), false, brv.data(), {}, brv.strides());
+
+        stra_mult(comm, cfg, cm.length(0), cm.length(1), am.length(1),
+                  alpha, false, am.data(), am.stride(0), am.stride(1),
+                         false, bm.data(), bm.stride(0), bm.stride(1),
+                   T(0), false, cm.data(), cm.stride(0), cm.stride(1));
+
+        add(comm, cfg, {}, {}, crv.lengths(),
+            T(1), false, crv.data(), {},            crv.strides(),
+            beta, false,          C, {}, stride_C_AC+stride_C_BC);
+    }
+}
+
+template <typename T>
+void stra_weight_ref(const communicator& comm, const config& cfg,
+                     const std::vector<len_type>& len_AC,
+                     const std::vector<len_type>& len_BC,
+                     const std::vector<len_type>& len_ABC,
+                     T alpha, const T* A,
+                     const std::vector<stride_type>& stride_A_AC,
+                     const std::vector<stride_type>& stride_A_ABC,
+                              const T* B,
+                     const std::vector<stride_type>& stride_B_BC,
+                     const std::vector<stride_type>& stride_B_ABC,
+                     T  beta,       T* C,
+                     const std::vector<stride_type>& stride_C_AC,
+                     const std::vector<stride_type>& stride_C_BC,
+                     const std::vector<stride_type>& stride_C_ABC)
+{
+    (void)cfg;
+
+    MArray::viterator<2> iter_AC(len_AC, stride_A_AC, stride_C_AC);
+    MArray::viterator<2> iter_BC(len_BC, stride_B_BC, stride_C_BC);
+    MArray::viterator<3> iter_ABC(len_ABC, stride_A_ABC, stride_B_ABC, stride_C_ABC);
+    len_type n = stl_ext::prod(len_ABC);
+
+    len_type n_min, n_max;
+    std::tie(n_min, n_max, std::ignore) = comm.distribute_over_threads(n);
+
+    iter_ABC.position(n_min, A, B, C);
+
+    for (len_type i = n_min;i < n_max;i++)
+    {
+        iter_ABC.next(A, B, C);
+
+        while (iter_AC.next(A, C))
+        {
+            if (beta == T(0))
+            {
+                while (iter_BC.next(B, C))
+                {
+                    *C = alpha*(*A)*(*B);
+                }
+            }
+            else
+            {
+                while (iter_BC.next(B, C))
+                {
+                    *C = alpha*(*A)*(*B) + beta*(*C);
+                }
+            }
+        }
+    }
+}
+
+template <typename T>
+void stra_mult(const communicator& comm, const config& cfg,
+               const std::vector<len_type>& len_A,
+               const std::vector<len_type>& len_B,
+               const std::vector<len_type>& len_C,
+               const std::vector<len_type>& len_AB,
+               const std::vector<len_type>& len_AC,
+               const std::vector<len_type>& len_BC,
+               const std::vector<len_type>& len_ABC,
+               T alpha, bool conj_A, const T* A,
+               const std::vector<stride_type>& stride_A_A,
+               const std::vector<stride_type>& stride_A_AB,
+               const std::vector<stride_type>& stride_A_AC,
+               const std::vector<stride_type>& stride_A_ABC,
+                        bool conj_B, const T* B,
+               const std::vector<stride_type>& stride_B_B,
+               const std::vector<stride_type>& stride_B_AB,
+               const std::vector<stride_type>& stride_B_BC,
+               const std::vector<stride_type>& stride_B_ABC,
+               T  beta, bool conj_C,       T* C,
+               const std::vector<stride_type>& stride_C_C,
+               const std::vector<stride_type>& stride_C_AC,
+               const std::vector<stride_type>& stride_C_BC,
+               const std::vector<stride_type>& stride_C_ABC)
+{
+    TBLIS_ASSERT(!conj_A && !conj_B && !conj_C);
+
+    if (len_A.empty() && len_B.empty() && len_C.empty() &&
+        (len_AB.empty() || len_ABC.empty()))
+    {
+        if (len_AB.empty())
+        {
+            if (len_ABC.empty())
+            {
+                if (impl == REFERENCE)
+                {
+                    stra_outer_prod_ref(comm, cfg, len_AC, len_BC,
+                                        alpha, A, stride_A_AC,
+                                               B, stride_B_BC,
+                                         beta, C, stride_C_AC, stride_C_BC);
+                }
+                else
+                {
+                    stra_outer_prod_blas(comm, cfg, len_AC, len_BC,
+                                         alpha, A, stride_A_AC,
+                                                B, stride_B_BC,
+                                          beta, C, stride_C_AC, stride_C_BC);
+                }
+            }
+            else
+            {
+                if (impl == REFERENCE)
+                {
+                    stra_weight_ref(comm, cfg, len_AC, len_BC, len_ABC,
+                                   alpha, A, stride_A_AC, stride_A_ABC,
+                                          B, stride_B_BC, stride_B_ABC,
+                                    beta, C, stride_C_AC, stride_C_BC, stride_C_ABC);
+                }
+                else
+                {
+                    stra_weight_blas(comm, cfg, len_AC, len_BC, len_ABC,
+                                    alpha, A, stride_A_AC, stride_A_ABC,
+                                           B, stride_B_BC, stride_B_ABC,
+                                     beta, C, stride_C_AC, stride_C_BC, stride_C_ABC);
+                }
+            }
+        }
+        else
+        {
+            if (impl == REFERENCE)
+            {
+                stra_contract_ref(comm, cfg, len_AB, len_AC, len_BC,
+                                 alpha, A, stride_A_AB, stride_A_AC,
+                                        B, stride_B_AB, stride_B_BC,
+                                  beta, C, stride_C_AC, stride_C_BC);
+            }
+            else if (impl == BLAS_BASED)
+            {
+                stra_contract_blas(comm, cfg, len_AB, len_AC, len_BC,
+                                  alpha, A, stride_A_AB, stride_A_AC,
+                                         B, stride_B_AB, stride_B_BC,
+                                   beta, C, stride_C_AC, stride_C_BC);
+            }
+            else
+            {
+                stra_contract_blis(comm, cfg, len_AB, len_AC, len_BC,
+                                  alpha, A, stride_A_AB, stride_A_AC,
+                                         B, stride_B_AB, stride_B_BC,
+                                   beta, C, stride_C_AC, stride_C_BC);
+            }
+        }
+    }
+    else
+    {
+        if (impl == REFERENCE)
+        {
+            stra_mult_ref(comm, cfg, len_A, len_B, len_C,
+                        len_AB, len_AC, len_BC, len_ABC,
+                        alpha, A, stride_A_A, stride_A_AB,
+                                  stride_A_AC, stride_A_ABC,
+                               B, stride_B_B, stride_B_AB,
+                                  stride_B_BC, stride_B_ABC,
+                         beta, C, stride_C_C, stride_C_AC,
+                                  stride_C_BC, stride_C_ABC);
+        }
+        else
+        {
+            stra_mult_blas(comm, cfg, len_A, len_B, len_C,
+                         len_AB, len_AC, len_BC, len_ABC,
+                         alpha, A, stride_A_A, stride_A_AB,
+                                   stride_A_AC, stride_A_ABC,
+                                B, stride_B_B, stride_B_AB,
+                                   stride_B_BC, stride_B_ABC,
+                          beta, C, stride_C_C, stride_C_AC,
+                                   stride_C_BC, stride_C_ABC);
+        }
+    }
+
+    comm.barrier();
+}
+
+#define FOREACH_TYPE(T) \
+template void stra_mult(const communicator& comm, const config& cfg, \
+                        const std::vector<len_type>& len_A, \
+                        const std::vector<len_type>& len_B, \
+                        const std::vector<len_type>& len_C, \
+                        const std::vector<len_type>& len_AB, \
+                        const std::vector<len_type>& len_AC, \
+                        const std::vector<len_type>& len_BC, \
+                        const std::vector<len_type>& len_ABC, \
+                        T alpha, bool conj_A, const T* A, \
+                        const std::vector<stride_type>& stride_A_A, \
+                        const std::vector<stride_type>& stride_A_AB, \
+                        const std::vector<stride_type>& stride_A_AC, \
+                        const std::vector<stride_type>& stride_A_ABC, \
+                                 bool conj_B, const T* B, \
+                        const std::vector<stride_type>& stride_B_B, \
+                        const std::vector<stride_type>& stride_B_AB, \
+                        const std::vector<stride_type>& stride_B_BC, \
+                        const std::vector<stride_type>& stride_B_ABC, \
+                        T  beta, bool conj_C,       T* C, \
+                        const std::vector<stride_type>& stride_C_C, \
+                        const std::vector<stride_type>& stride_C_AC, \
+                        const std::vector<stride_type>& stride_C_BC, \
+                        const std::vector<stride_type>& stride_C_ABC);
+#include "configs/foreach_type.h"
+
+}
+}

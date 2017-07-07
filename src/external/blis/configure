@@ -1,0 +1,701 @@
+#!/bin/bash
+#
+#  BLIS    
+#  An object-based framework for developing high-performance BLAS-like
+#  libraries.
+#
+#  Copyright (C) 2014, The University of Texas at Austin
+#
+#  Redistribution and use in source and binary forms, with or without
+#  modification, are permitted provided that the following conditions are
+#  met:
+#   - Redistributions of source code must retain the above copyright
+#     notice, this list of conditions and the following disclaimer.
+#   - Redistributions in binary form must reproduce the above copyright
+#     notice, this list of conditions and the following disclaimer in the
+#     documentation and/or other materials provided with the distribution.
+#   - Neither the name of The University of Texas at Austin nor the names
+#     of its contributors may be used to endorse or promote products
+#     derived from this software without specific prior written permission.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+#  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+#  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+#  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+#  HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+#  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+#  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+#  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+#  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+#  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+#  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+#
+
+print_usage()
+{
+	# Echo usage info.
+	echo " "
+	echo " ${script_name} (BLIS ${version})"
+	#echo " "
+	#echo " BLIS ${version}"
+	echo " "
+	echo " Field G. Van Zee"
+	echo " "
+	echo " Configure BLIS's build system for compilation using a specified"
+	echo " configuration directory."
+	echo " "
+	echo " Usage:"
+	echo " "
+	echo "   ${script_name} [options] [env. vars.] confname"
+	echo " "
+	echo " Arguments:"
+	echo " "
+	echo "   confname      The name of the sub-directory inside of the 'config'"
+	echo "                 directory containing the desired BLIS configuration."
+	echo "                 Note that confname MUST be specified; if it is not,"
+	echo "                 configure will complain. To build a reference"
+	echo "                 implementation, use the 'reference' configuration"
+	echo " "
+	echo " Options:"
+	echo " "
+	echo "   -p PREFIX, --prefix=PREFIX"
+	echo " "
+	echo "                 The path to which make will install buid products."
+	echo "                 If not given, PREFIX defaults to \$(HOME)/blis. If"
+	echo "                 the path refers to a directory that does not exist,"
+	echo "                 it will be created."
+	echo " "
+	echo "   -d DEBUG, --enable-debug[=DEBUG]"
+	echo " "
+	echo "                 Enable debugging symbols in the library. If argument"
+	echo "                 DEBUG is given as 'opt', then optimization flags are"
+	echo "                 kept in the framework, otherwise optimization is"
+	echo "                 turned off."
+	echo " "
+	echo "   --enable-verbose-make, --disable-verbose-make"
+	echo " "
+	echo "                 Enable (disabled by default) verbose compilation"
+	echo "                 output during make."
+	echo " "
+	echo "   --disable-static, --enable-static"
+	echo " "
+	echo "                 Disable (enabled by default) building BLIS as a static"
+	echo "                 library. May be combined with --enable-shared."
+	echo " "
+	echo "   --enable-shared, --disable-static"
+	echo " "
+	echo "                 Enable (disabled by default) building BLIS as a shared"
+	echo "                 library. May be combined with --enable-static."
+	echo " "
+	echo "   -t MODEL, --enable-threading[=MODEL], --disable-threading"
+	echo " "
+	echo "                 Enable threading in the library, using threading model"
+	echo "                 MODEL={omp,pthreads,no}. If MODEL=no or "
+	echo "                 --disable-threading is specified, threading will be"
+	echo "                 disabled. The default is 'no'."
+	echo " "
+	echo "   -q, --quiet   Suppress informational output. By default, configure"
+	echo "                 is verbose. (NOTE: -q is not yet implemented)"
+	echo " "
+	echo "   -i SIZE, --int-size=SIZE"
+	echo " "
+	echo "                 Set the size (in bits) of internal BLIS integers and"
+	echo "                 integer types used in native BLIS interfaces. The"
+	echo "                 default inteter type size is architecture dependent."
+	echo "                 (Hint: You can always find this value printed at the"
+	echo "                 beginning of the testsuite output.)"
+	echo " "
+	echo "   -b SIZE, --blas-int-size=SIZE"
+	echo " "
+	echo "                 Set the size (in bits) of integer types in external"
+	echo "                 BLAS and CBLAS interfaces, if enabled. The default"
+	echo "                 integer type size used in BLAS/CBLAS is 32 bits."
+	echo " "
+	echo "   --disable-blas, --enable-blas"
+	echo " "
+	echo "                 Disable (enabled by default) building the BLAS"
+	echo "                 compatibility layer."
+	echo " "
+	echo "   --enable-cblas, --disable-cblas"
+	echo " "
+	echo "                 Enable (disabled by default) building the CBLAS"
+	echo "                 compatibility layer. This automatically enables the"
+	echo "                 BLAS compatibility layer as well."
+	echo " "
+	echo "   -h, --help    Output this information and quit."
+	echo " "
+	echo " Environment Variables:"
+	echo " "
+	echo "   CC            Specifies the C compiler to use."
+	echo " "
+	echo "   Environment variables may also be specified as command line"
+	echo "   options, e.g.:"
+	echo " "
+	echo "     ./configure [options] CC=gcc sandybridge"
+	echo " "
+	echo "   Note that not all compilers are compatible with a given"
+	echo "   configuration."
+	echo " "
+
+	# Exit with non-zero exit status
+	exit 1
+}
+
+main()
+{
+	# The name of the script, stripped of any preceeding path.
+	script_name=${0##*/}
+
+	# The path to the script. We need this to find the top-level directory
+	# of the source distribution in the event that the user has chosen to
+	# build elsewhere.
+	dist_path=${0%/${script_name}}
+
+	# The path to the directory in which we are building. We do this to
+	# make explicit that we distinguish between the top-level directory
+	# of the distribution and the directory in which we are building.
+	cur_dirpath="."
+
+	# The file in which the version string is kept.
+	version_file="version"
+	version_filepath="${dist_path}/${version_file}"
+
+	# The name of and path to the directory named "build" in the top-level
+	# directory of the source distribution.
+	build_dir='build'
+	build_dirpath="${dist_path}/${build_dir}"
+
+	# The names/paths for the template config.mk.in and its instantiated
+	# counterpart.
+	config_mk_in='config.mk.in'
+	config_mk_out='config.mk'
+	config_mk_in_path="${build_dirpath}/${config_mk_in}"
+	config_mk_out_path="${cur_dirpath}/${config_mk_out}"
+
+	# The names/paths for the template bli_config.h.in and its instantiated
+	# counterpart.
+	bli_config_h_in='bli_config.h.in'
+	bli_config_h_out='bli_config.h'
+	bli_config_h_in_path="${build_dirpath}/${bli_config_h_in}"
+	bli_config_h_out_path="${cur_dirpath}/${bli_config_h_out}"
+
+	# Path to 'update-version-file.sh' script.
+	update_version_file_sh="${build_dirpath}/update-version-file.sh"
+
+	# Path to 'mirror-tree.sh' script.
+	mirror_tree_sh="${build_dirpath}/mirror-tree.sh"
+
+	# Path to 'gen-make-frags.sh' script and directory.
+	gen_make_frags_dirpath="${build_dirpath}/gen-make-frags"
+	gen_make_frags_sh="${gen_make_frags_dirpath}/gen-make-frag.sh"
+
+	# The root directory of the BLIS framework.
+	frame_dir='frame'
+	frame_dirpath="${dist_path}/${frame_dir}"
+
+	# The name of the (top-level) configuration directory.
+	config_dir='config'
+	config_dirpath="${dist_path}/${config_dir}"
+
+	# The name of the directory in which object files will be kept.
+	obj_dir='obj'
+	obj_dirpath="${cur_dirpath}/${obj_dir}"
+
+	# The name of the directory in which libraries will be kept.
+	lib_dir='lib'
+	lib_dirpath="${cur_dirpath}/${lib_dir}"
+
+	# The name of the directory in which the test suite is kept.
+	testsuite_dir='testsuite'
+
+	# The install prefix flag.
+	install_prefix_def="${HOME}/blis"
+	install_prefix=''
+	prefix_flag=''
+
+	# The debug flag.
+	debug_type=''
+	debug_flag=''
+
+	# The threading flag.
+	threading_model='no'
+
+	# Option variables.
+	quiet_flag=''
+	
+	# Additional flags.
+	enable_verbose='no'
+	enable_static='yes'
+	enable_shared='no'
+	int_type_size=0
+	blas2blis_int_type_size=32
+	enable_blas2blis='yes'
+	enable_cblas='no'
+
+	# The path to the auto-detection script.
+	auto_detect_sh="${build_dirpath}/auto-detect/auto-detect.sh"
+
+	# The name of the reference configuration sub-directory.
+	config_name_ref='reference'
+
+	# The name of the chosen configuration sub-directory.
+	config_name=''
+
+	# Dummy file. Used to check whether the cwd is the same as the top-level
+	# source distribution directory.
+	dummy_file='_blis_dir_detect.tmp'
+
+
+	# Check whether we need to update the version file.
+	${update_version_file_sh} -o "${script_name}" "${version_filepath}"
+
+
+	# Query which version of BLIS this is.
+	version=$(cat ${version_filepath})
+
+
+	# Process our command line options.
+	while getopts ":hp:d:t:qi:b:-:" opt; do
+		case $opt in
+			-)
+				case "$OPTARG" in
+					help)
+						print_usage
+						;;
+					quiet)
+						quiet_flag=1
+						;;
+					prefix=*)
+						prefix_flag=1
+						install_prefix=${OPTARG#*=}
+						;;
+					enable-debug)
+						debug_flag=1
+						debug_type=noopt
+						;;
+					enable-debug=*)
+						debug_flag=1
+						debug_type=${OPTARG#*=}
+						;;
+					disable-debug)
+						debug_flag=0
+						;;
+					enable-verbose-make)
+						enable_verbose='yes'
+						;;
+					disable-verbose-make)
+						enable_verbose='no'
+						;;
+					enable-static)
+						enable_static='yes'
+						;;
+					disable-static)
+						enable_static='no'
+						;;
+					enable-shared)
+						enable_shared='yes'
+						;;
+					disable-shared)
+						enable_shared='no'
+						;;
+					enable-threading=*)
+						threading_model=${OPTARG#*=}
+						;;
+					disable-threading)
+						threading_model='no'
+						;;
+					int-size=*)
+						int_type_size=${OPTARG#*=}
+						;;
+					blas-int-size=*)
+						blas2blis_int_type_size=${OPTARG#*=}
+						;;
+					enable-blas)
+						enable_blas2blis='yes'
+						;;
+					disable-blas)
+						enable_blas2blis='no'
+						;;
+					enable-cblas)
+						enable_cblas='yes'
+						;;
+					disable-cblas)
+						enable_cblas='no'
+						;;
+					*)
+						print_usage
+						;;
+				esac;;
+			h)
+				print_usage
+				;;
+			p)
+				prefix_flag=1
+				install_prefix=$OPTARG
+				;;
+			d)
+				debug_flag=1
+				debug_type=$OPTARG
+				;;
+			q)
+				quiet_flag=1
+				;;
+			t)
+				threading_model=$OPTARG
+				;;
+			i)
+				int_type_size=$OPTARG
+				;;
+			b)
+				blas2blis_int_type_size=$OPTARG
+				;;
+			\?)
+				print_usage
+				;;
+		esac
+	done
+	shift $(($OPTIND - 1))
+	
+	
+	# Parse environment variables
+	while [ $# -gt 0 ]; do
+		case $1 in
+			CC=*)
+				CC=${1#*=}
+				shift
+				;;
+			*=*)
+				print_usage
+				;;
+			*)
+				break
+				;;
+		esac
+	done
+
+
+	# Initial message.
+	echo "${script_name}: starting configuration of BLIS ${version}."
+
+
+	# Set config_name based on the number of arguments leftover (after command
+	# line option processing).
+	if [ $# = "0" ]; then
+
+		configs_avail="auto "$(ls ${config_dirpath})
+
+		echo "${script_name}: "
+		echo "${script_name}: *** No configuration given! ***"
+		echo "${script_name}: "
+		echo "${script_name}: Default configuration behavior is not implemented (for your"
+		echo "${script_name}: own safety). Please re-run '${script_name}' and specify one"
+		echo "${script_name}: of the existing configurations in the source distribution's"
+		echo "${script_name}  '${config_dir}' directory:"
+		echo "${script_name}: "
+		for conf in ${configs_avail}; do
+			echo "${script_name}:   ${conf}"
+		done
+		echo "${script_name}: "
+		echo "${script_name}: or, alternatively, first create a new configuration (placing"
+		echo "${script_name}: it in the '${config_dir}' directory) and then run '${script_name}' with"
+		echo "${script_name}: that configuration. To build a reference implementation of"
+		echo "${script_name}: BLIS, use the '${config_name_ref}' configuration:"
+		echo "${script_name}: "
+		echo "${script_name}:   ./${script_name} ${config_name_ref}"
+		echo "${script_name}: "
+		echo "${script_name}: For a full description of how to run ${script_name}, please refer"
+		echo "${script_name}: to the output of:"
+		echo "${script_name}: "
+		echo "${script_name}:   ./${script_name} -h"
+		echo "${script_name}: "
+
+		exit 1
+
+	elif [ $# = "1" ]; then
+
+		if [ $1 = "auto" ]; then
+
+			echo "${script_name}: automatic configuration requested."
+			config_name=`${build_dirpath}/auto-detect/auto-detect.sh`
+			#config_name=$(${auto_detect_sh})
+
+		else
+
+			echo "${script_name}: manual configuration requested."
+			config_name=$1
+		fi
+
+		echo "${script_name}: configuring with '${config_name}' configuration sub-directory."
+	else
+
+		print_usage
+	fi
+
+	# Build the config directory path.
+	configname_dirpath="${config_dirpath}/${config_name}"
+
+
+	# Set the install prefix if it was not already set when parsing the install
+	# prefix flag.
+	if [ -n "${prefix_flag}" ]; then
+		echo "${script_name}: using install prefix '${install_prefix}'."
+	else
+		install_prefix="${install_prefix_def}"
+		echo "${script_name}: no install prefix given; defaulting to '${install_prefix}'."
+	fi
+
+
+	# Check if the debug flag was specified.
+	if [ -n "${debug_flag}" ]; then
+		if [ "x${debug_type}" = "xopt" ]; then
+			echo "${script_name}: enabling debug symbols with optimizations."
+		else
+			debug_type='noopt'
+			echo "${script_name}: enabling debug symbols; optimizations disabled."
+		fi
+	else
+		debug_type='off'
+		echo "${script_name}: debug symbols disabled."
+	fi
+
+
+	# Check if the verbose make flag was specified.
+	if [ "x${enable_verbose}" = "xyes" ]; then
+		echo "${script_name}: enabling verbose make output, disable with 'make V=0'."
+	else
+		echo "${script_name}: disabling verbose make output, enable with 'make V=1'."
+	fi
+
+
+	# Check if the static lib flag was specified.
+	if [ "x${enable_static}" = "xyes" ]; then
+		echo "${script_name}: building BLIS as a static library."
+	fi
+	
+	# Check if the shared lib flag was specified.
+	if [ "x${enable_shared}" = "xyes" ]; then
+		echo "${script_name}: building BLIS as a shared library."
+	fi
+	
+	# Check if neither flag was specified.
+	if [ "x${enable_static}" = "xno" -a "x${enable_shared}" = "xno" ]; then
+		echo "Neither a shared nor static library build has been requested."
+		exit 1
+	fi
+	
+	
+	# Check the threading model flag.
+	enable_openmp=0
+	enable_pthreads=0
+	if [ "x${threading_model}" = "xauto" ]; then
+		echo "${script_name}: determining the threading model automatically."
+	elif [ "x${threading_model}" = "xomp" ]; then
+		echo "${script_name}: using OpenMP for threading."
+		enable_openmp=1
+	elif [ "x${threading_model}" = "xpthreads" ]; then
+		echo "${script_name}: using Pthreads for threading."
+		enable_pthreads=1
+	elif [ "x${threading_model}" = "xno" ]; then
+		echo "${script_name}: threading is disabled."
+	else
+		echo "Unsupported threading model: ${threading_model}."
+		exit 1
+	fi
+	
+	
+	# Convert 'yes' and 'no' flags to booleans.
+	if [ "x${enable_cblas}" = "xyes" ]; then
+	   echo "${script_name}: the CBLAS compatibility layer is enabled."
+	   enable_cblas=1
+	   # Force BLAS layer when CBLAS is enabled
+	   enable_blas='yes'
+	else
+	   echo "${script_name}: the CBLAS compatibility layer is disabled."
+	   enable_cblas=0
+	fi
+	if [ "x${enable_blas2blis}" = "xyes" ]; then
+	   echo "${script_name}: the BLAS compatibility layer is enabled."
+	   enable_blas2blis=1
+	else
+	   echo "${script_name}: the BLAS compatibility layer is disabled."
+	   enable_blas2blis=0
+	fi
+	
+	
+	# Report integer sizes
+	if [ "x${int_type_size}" = "x32" ]; then
+		echo "${script_name}: the internal integer size is 32-bit."
+	elif [ "x${int_type_size}" = "x64" ]; then
+		echo "${script_name}: the internal integer size is 64-bit."
+	else
+		echo "${script_name}: the internal integer size is automatically determined."
+	fi
+	if [ "x${blas2blis_int_type_size}" = "x32" ]; then
+		echo "${script_name}: the BLAS/CBLAS interface integer size is 32-bit."
+	elif [ "x${blas2blis_int_type_size}" = "x64" ]; then
+		echo "${script_name}: the BLAS/CBLAS interface integer size is 64-bit."
+	else
+		echo "${script_name}: the BLAS/CBLAS interface integer size is automatically determined."
+	fi
+
+
+	# Insert escape characters into the paths used in the sed command below.
+	install_prefix_esc=$(echo "${install_prefix}" | sed 's/\//\\\//g')
+	dist_path_esc=$(echo "${dist_path}"           | sed 's/\//\\\//g')
+	cc_esc=$(echo "${CC}" | sed 's/\//\\\//g')
+	#echo "${install_prefix_esc}"
+	#exit 1
+
+
+	# Begin substituting information into the config_mk_in file, outputting
+	# to config_mk_out.
+	echo "${script_name}: creating ${config_mk_out_path} from ${config_mk_in_path}"
+	cat "${config_mk_in_path}" \
+		| sed "s/@config_name@/${config_name}/g" \
+		| sed "s/@dist_path@/${dist_path_esc}/g" \
+		| sed "s/@CC@/${cc_esc}/g" \
+		| sed "s/@debug_type@/${debug_type}/g" \
+		| sed "s/@install_prefix@/${install_prefix_esc}/g" \
+		| sed "s/@enable_verbose@/${enable_verbose}/g" \
+		| sed "s/@enable_static@/${enable_static}/g" \
+		| sed "s/@enable_dynamic@/${enable_shared}/g" \
+		| sed "s/@threading_model@/${threading_model}/g" \
+		> "${config_mk_out_path}"
+		
+
+	# Begin substituting information into the bli_config_h_in file, outputting
+	# to bli_config_h_out.
+	echo "${script_name}: creating ${bli_config_h_out_path} from ${bli_config_h_in_path}"
+	cat "${bli_config_h_in_path}" \
+		| sed "s/@enable_openmp@/${enable_openmp}/g" \
+		| sed "s/@enable_pthreads@/${enable_pthreads}/g" \
+		| sed "s/@int_type_size@/${int_type_size}/g" \
+		| sed "s/@blas2blis_int_type_size@/${blas2blis_int_type_size}/g" \
+		| sed "s/@enable_blas2blis@/${enable_blas2blis}/g" \
+		| sed "s/@enable_cblas@/${enable_cblas}/g" \
+		> "${bli_config_h_out_path}"
+
+
+	# Create obj sub-directories (if they do not already exist).
+	base_obj_dirpath="${obj_dirpath}/${config_name}"
+
+	echo "${script_name}: creating ${base_obj_dirpath}"
+	mkdir -p ${base_obj_dirpath}
+
+	obj_config_dirpath="${base_obj_dirpath}/${config_dir}"
+
+	echo "${script_name}: creating ${obj_config_dirpath}"
+	mkdir -p ${obj_config_dirpath}
+
+	obj_frame_dirpath="${base_obj_dirpath}/${frame_dir}"
+
+	echo "${script_name}: creating ${obj_frame_dirpath}"
+	mkdir -p ${obj_frame_dirpath}
+
+	obj_testsuite_dirpath="${base_obj_dirpath}/${testsuite_dir}"
+
+	echo "${script_name}: creating ${obj_testsuite_dirpath}"
+	mkdir -p ${obj_testsuite_dirpath}
+
+
+	# Create lib directory (if it does not already exist).
+	base_lib_dirpath="${lib_dirpath}/${config_name}"
+
+	echo "${script_name}: creating ${base_lib_dirpath}"
+	mkdir -p ${base_lib_dirpath}
+
+
+	# Mirror config source tree to the object config sub-directory.
+	echo "${script_name}: mirroring ${configname_dirpath} to ${obj_config_dirpath}"
+	${mirror_tree_sh} ${configname_dirpath} ${obj_config_dirpath}
+
+	# Mirror frame source tree to the object frame sub-directory.
+	echo "${script_name}: mirroring ${frame_dirpath} to ${obj_frame_dirpath}"
+	${mirror_tree_sh} ${frame_dirpath} ${obj_frame_dirpath}
+
+
+	# Generate makefile fragments in the chosen configuration directory.
+	${gen_make_frags_sh} \
+			 -h -r -v1 \
+			 -o ${script_name} \
+			 -p 'CONFIG' \
+			 ${configname_dirpath} \
+			 ${gen_make_frags_dirpath}/fragment.mk \
+			 ${gen_make_frags_dirpath}/suffix_list \
+			 ${gen_make_frags_dirpath}/ignore_list \
+			 ${gen_make_frags_dirpath}/special_list
+
+	# Generate makefile fragments in the framework directory.
+	${gen_make_frags_sh} \
+			 -h -r -v1 \
+			 -o ${script_name} \
+			 -p 'FRAME' \
+			 ${frame_dirpath} \
+			 ${gen_make_frags_dirpath}/fragment.mk \
+			 ${gen_make_frags_dirpath}/suffix_list \
+			 ${gen_make_frags_dirpath}/ignore_list \
+			 ${gen_make_frags_dirpath}/special_list
+
+
+	# Under some circumstances, we need to create a symbolic link to the
+	# Makefile. We only proceed with this if configure was run with a path
+	# other than "./".
+	if [ ${dist_path} != "./" ]; then
+
+		# At this point, we know the user did not run "./configure". But we
+		# have not yet ruled out "<fullpath>/configure" or some # equivalent
+		# that uses relative paths. To further rule out these possibilities,
+		# we create a dummy file in the current build directory.
+		touch "./${dummy_file}"
+
+		# If the dummy file we just created in the current directory does not
+		# appear in the source distribution path, then we are in a different
+		# directory and thus we must create a symbolic link.
+		if [ ! -f "${dist_path}/${dummy_file}" ]; then
+
+			# If 'Makefile' does not already exist in the current directory,
+			# create a symbolic link to it. If one does exist, we us -f to
+			# force creation of a new link.
+			if [ ! -e "./Makefile" ]; then
+
+				echo "${script_name}: creating symbolic link to Makefile."
+				ln -s "${dist_path}/Makefile"
+
+			else
+				echo "${script_name}: symbolic link to Makefile already exists; forcing creation of new link."
+				ln -sf "${dist_path}/Makefile"
+			fi
+
+			# If 'common.mk' does not already exist in the current directory,
+			# create a symbolic link to it. If one does exist, we us -f to
+			# force creation of a new link.
+			if [ ! -e "./common.mk" ]; then
+
+				echo "${script_name}: creating symbolic link to common.mk."
+				ln -s "${dist_path}/common.mk"
+
+			else
+				echo "${script_name}: symbolic link to common.mk already exists; forcing creation of new link."
+				ln -sf "${dist_path}/common.mk"
+			fi
+
+			echo "${script_name}: configured to build outside of source distribution."
+		else
+
+			# Echo what is happening. 
+			echo "${script_name}: configured to build within top-level directory of source distribution."
+		fi
+
+		# Remove the dummy file.
+		rm -f "./${dummy_file}"
+	fi
+
+
+	# Exit peacefully.
+	return 0
+}
+
+
+# The script's main entry point, passing all parameters given.
+main "$@"

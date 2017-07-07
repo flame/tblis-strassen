@@ -1,0 +1,840 @@
+#ifndef _TBLIS_STRA_NODES_GEMM_UKR_HPP_
+#define _TBLIS_STRA_NODES_GEMM_UKR_HPP_
+
+#include "util/basic_types.h"
+#include "util/thread.h"
+
+#include "matrix/stra_matrix_view.hpp"
+#include "matrix/stra_block_scatter_matrix.hpp"
+
+#include "configs/configs.hpp"
+
+namespace tblis
+{
+
+template <typename T>
+void accum_utile_list(len_type m, len_type n,
+                 const T* TBLIS_RESTRICT p_ab, stride_type rs_ab, stride_type cs_ab,
+                 T beta,
+                 unsigned N, T** TBLIS_RESTRICT p_c_list, T* coeff_list,
+                 const stride_type** TBLIS_RESTRICT rs_c, stride_type cs_c)
+{
+    if (beta == T(0))
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                for (unsigned idx = 0; idx < N; idx++) {
+                    p_c_list[idx][rs_c[idx][i] + j*cs_c] = coeff_list[idx] * p_ab[i*rs_ab + j*cs_ab];
+                }
+            }
+        }
+    }
+    else
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                for (unsigned idx = 0; idx < N; idx++) {
+                    p_c_list[idx][rs_c[idx][i] + j*cs_c] = coeff_list[idx] * p_ab[i*rs_ab + j*cs_ab] + beta*p_c_list[idx][rs_c[idx][i] + j*cs_c];
+                }
+            }
+        }
+    }
+}
+
+template <typename T>
+void accum_utile_list(len_type m, len_type n,
+                 const T* TBLIS_RESTRICT p_ab, stride_type rs_ab, stride_type cs_ab,
+                 T beta,
+                 unsigned N, T** TBLIS_RESTRICT p_c_list, T* coeff_list,
+                 stride_type rs_c, const stride_type** TBLIS_RESTRICT cs_c)
+{
+    if (beta == T(0))
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                for (unsigned idx = 0; idx < N; idx++) {
+                    p_c_list[idx][i*rs_c + cs_c[idx][j]] = coeff_list[idx] * p_ab[i*rs_ab + j*cs_ab];
+                }
+            }
+        }
+    }
+    else
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                for (unsigned idx = 0; idx < N; idx++) {
+
+                    p_c_list[idx][i*rs_c + cs_c[idx][j]] = coeff_list[idx] * p_ab[i*rs_ab + j*cs_ab] + beta*p_c_list[idx][i*rs_c + cs_c[idx][j]];
+                }
+            }
+        }
+    }
+}
+
+
+
+template <typename T>
+void accum_utile_list(len_type m, len_type n,
+                 const T* TBLIS_RESTRICT p_ab, stride_type rs_ab, stride_type cs_ab,
+                 T beta,
+                 unsigned N, T** TBLIS_RESTRICT p_c_list, T* coeff_list,
+                 const stride_type** rs_c,
+                 const stride_type** cs_c)
+{
+    //std::cout << "beta:" << beta << std::endl;
+
+    if (beta == T(0))
+    {
+
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                for (unsigned idx = 0; idx < N; idx++) {
+                    p_c_list[idx][rs_c[idx][i] + cs_c[idx][j]] = coeff_list[idx] * p_ab[i*rs_ab + j*cs_ab];
+                }
+            }
+        }
+    }
+    else
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                for (unsigned idx = 0; idx < N; idx++) {
+                    p_c_list[idx][rs_c[idx][i] + cs_c[idx][j]] = coeff_list[idx] * p_ab[i*rs_ab + j*cs_ab] + beta*p_c_list[idx][rs_c[idx][i] + cs_c[idx][j]];
+                }
+            }
+        }
+    }
+
+
+
+    //for (unsigned idx = 0; idx < N; idx++) {
+    //    std::cout << "C[" << idx << "]:" << std::endl;
+    //    for (len_type i = 0;i < m;i++)
+    //    {
+    //        for (len_type j = 0;j < n;j++)
+    //        {
+    //            std::cout << p_c_list[idx][rs_c[idx][i] + cs_c[idx][j]]  << " ";
+    //        }
+    //        std::cout << std::endl;
+    //    }
+    //}
+}
+
+template <typename T>
+void accum_utile_list(len_type m, len_type n,
+                 const T* TBLIS_RESTRICT p_ab, stride_type rs_ab, stride_type cs_ab,
+                 T beta, unsigned N, T** TBLIS_RESTRICT p_c_list, T* coeff_list, stride_type rs_c, stride_type cs_c)
+{
+    //std::cout << "beta:" << beta << std::endl;
+    if (beta == T(0))
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                for (unsigned idx = 0; idx < N; idx++) {
+                    p_c_list[idx][i*rs_c + j*cs_c] = coeff_list[idx] * p_ab[i*rs_ab + j*cs_ab];
+                }
+            }
+        }
+    }
+    else
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                for (unsigned idx = 0; idx < N; idx++) {
+                    p_c_list[idx][i*rs_c + j*cs_c] = coeff_list[idx] * p_ab[i*rs_ab + j*cs_ab] + beta*p_c_list[idx][i*rs_c + j*cs_c];
+                }
+            }
+        }
+    }
+}
+
+template <typename T>
+void accum_utile(len_type m, len_type n,
+                 const T* TBLIS_RESTRICT p_ab, stride_type rs_ab, stride_type cs_ab,
+                 T beta, T* TBLIS_RESTRICT p_c, stride_type rs_c, stride_type cs_c)
+{
+    if (beta == T(0))
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                p_c[i*rs_c + j*cs_c] = p_ab[i*rs_ab + j*cs_ab];
+            }
+        }
+    }
+    else
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                p_c[i*rs_c + j*cs_c] = p_ab[i*rs_ab + j*cs_ab] + beta*p_c[i*rs_c + j*cs_c];
+            }
+        }
+    }
+}
+
+template <typename T>
+void accum_utile(len_type m, len_type n,
+                 const T* TBLIS_RESTRICT p_ab, stride_type rs_ab, stride_type cs_ab,
+                 T beta, T* TBLIS_RESTRICT p_c,
+                 const stride_type* TBLIS_RESTRICT rs_c, stride_type cs_c)
+{
+    if (beta == T(0))
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                p_c[rs_c[i] + j*cs_c] = p_ab[i*rs_ab + j*cs_ab];
+            }
+        }
+    }
+    else
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                p_c[rs_c[i] + j*cs_c] = p_ab[i*rs_ab + j*cs_ab] + beta*p_c[rs_c[i] + j*cs_c];
+            }
+        }
+    }
+}
+
+template <typename T>
+void accum_utile(len_type m, len_type n,
+                 const T* TBLIS_RESTRICT p_ab, stride_type rs_ab, stride_type cs_ab,
+                 T beta, T* TBLIS_RESTRICT p_c,
+                 stride_type rs_c, const stride_type* TBLIS_RESTRICT cs_c)
+{
+    if (beta == T(0))
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                p_c[i*rs_c + cs_c[j]] = p_ab[i*rs_ab + j*cs_ab];
+            }
+        }
+    }
+    else
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                p_c[i*rs_c + cs_c[j]] = p_ab[i*rs_ab + j*cs_ab] + beta*p_c[i*rs_c + cs_c[j]];
+            }
+        }
+    }
+}
+
+template <typename T>
+void accum_utile(len_type m, len_type n,
+                 const T* TBLIS_RESTRICT p_ab, stride_type rs_ab, stride_type cs_ab,
+                 T beta, T* TBLIS_RESTRICT p_c,
+                 const stride_type* TBLIS_RESTRICT rs_c,
+                 const stride_type* TBLIS_RESTRICT cs_c)
+{
+    if (beta == T(0))
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                p_c[rs_c[i] + cs_c[j]] = p_ab[i*rs_ab + j*cs_ab];
+            }
+        }
+    }
+    else
+    {
+        for (len_type j = 0;j < n;j++)
+        {
+            for (len_type i = 0;i < m;i++)
+            {
+                p_c[rs_c[i] + cs_c[j]] = p_ab[i*rs_ab + j*cs_ab] + beta*p_c[rs_c[i] + cs_c[j]];
+            }
+        }
+    }
+}
+
+struct stra_gemm_micro_kernel
+{
+    template <typename T, unsigned N>
+    void operator()(const communicator& comm, const config& cfg,
+                    T alpha, matrix_view<T>& A,
+                             matrix_view<T>& B,
+                    T  beta, stra_matrix_view<T,N>& C) const
+    {
+        (void)comm;
+
+        const len_type MR = cfg.gemm_mr.def<T>();
+        const len_type NR = cfg.gemm_nr.def<T>();
+        const bool row_major = cfg.gemm_row_major.value<T>();
+        const len_type rs_ab = (row_major ? NR : 1);
+        const len_type cs_ab = (row_major ? 1 : MR);
+
+        const T* p_a = A.data();
+        const T* p_b = B.data();
+        ////////////////////////p_c_list
+        //      T* p_c = C.data(0);
+
+        auto c_list = C.data_list();
+              T* p_c_list[N];
+        for (unsigned idx = 0; idx < N; idx++)
+        {
+            p_c_list[idx] = c_list[idx];
+        }
+
+        auto my_coeff_list = C.coeff_list();
+        T coeff_list[N];
+        for (unsigned idx = 0; idx < N; idx++)
+        {
+            coeff_list[idx] = my_coeff_list[idx];
+        }
+
+
+        len_type m = C.length(0);
+        len_type n = C.length(1);
+        len_type k = A.length(1);
+        stride_type rs_c = C.stride(0);
+        stride_type cs_c = C.stride(1);
+
+        //std::cout << "p_a:" << std::endl;
+        //for (int i=0; i < m; i++)
+        //{
+        //    for (int p = 0; p < k; p++)
+        //    {
+        //        std::cout << p_a[p*MR+i] << " ";
+        //    }
+        //    std::cout << std::endl;
+        //}
+
+        //std::cout << "p_b:" << std::endl;
+        //for (int p = 0; p < k; p++)
+        //{
+        //    for (int j = 0; j < n; j++)
+        //    {
+        //        std::cout << p_b[p*NR+j] << " ";
+        //    }
+        //    std::cout << std::endl;
+        //}
+
+
+
+        //if (m == MR && n == NR)
+        //{
+        //    cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+        //                         &beta, p_c, rs_c, cs_c);
+        //}
+        //else
+        //{
+        //    T p_ab[512] __attribute__((aligned(64)));
+        //    static constexpr T zero = T(0);
+
+        //    cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+        //                         &zero, &p_ab[0], rs_ab, cs_ab);
+
+        //    accum_utile(m, n, p_ab, rs_ab, cs_ab,
+        //                beta, p_c, rs_c, cs_c);
+        //}
+        
+
+        // Naive way:
+        //
+        //T p_ab[512] __attribute__((aligned(64)));
+        //static constexpr T zero = T(0);
+
+        //cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+        //                     &zero, &p_ab[0], rs_ab, cs_ab);
+
+        //accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+        //                 beta, N, p_c_list, coeff_list, rs_c, cs_c);
+
+
+        // Pure stra_gemm: not considering corner cases
+        //cfg.stra_gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+        //                          &beta, N, p_c_list, coeff_list, rs_c, cs_c);
+
+
+        if (m == MR && n == NR)
+        {
+            //p_c_list[i] is not changed inside assembly micro-kernel?
+
+            //cfg.stra_gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+            //                          &beta, N, p_c_list, coeff_list, rs_c, cs_c);
+
+
+            if (N == 1) {
+                cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                     &beta, p_c_list[0], rs_c, cs_c);
+            } else if ( N == 2 ) {
+                cfg.stra_gemm_ukr_two.call<T>(k, &alpha, p_a, p_b,
+                                      &beta, N, p_c_list, coeff_list, rs_c, cs_c);
+
+            } else if ( N == 4 ) {
+                cfg.stra_gemm_ukr_four.call<T>(k, &alpha, p_a, p_b,
+                                      &beta, N, p_c_list, coeff_list, rs_c, cs_c);
+
+
+            } else {
+                std::cout << "N is not 1,2,4" << std::endl;
+                cfg.stra_gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                      &beta, N, p_c_list, coeff_list, rs_c, cs_c);
+            }
+
+
+        }
+        else
+        {
+            T p_ab[512] __attribute__((aligned(64)));
+            static constexpr T zero = T(0);
+
+            cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                 &zero, &p_ab[0], rs_ab, cs_ab);
+
+            //accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+            //                 beta, N, p_c_list, coeff_list, rs_c, cs_c);
+
+            if (N == 1) {
+                accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                        beta, p_c_list[0], rs_c, cs_c);
+            } else if ( N == 2 ) {
+                accum_utile_list_two(m, n, p_ab, rs_ab, cs_ab,
+                        beta, N, p_c_list, coeff_list, rs_c, cs_c);
+            } else if ( N == 4 ) {
+                accum_utile_list_four(m, n, p_ab, rs_ab, cs_ab,
+                        beta, N, p_c_list, coeff_list, rs_c, cs_c);
+            } else {
+                std::cout << "N is not 1,2,4" << std::endl;
+                accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+                        beta, N, p_c_list, coeff_list, rs_c, cs_c);
+            }
+
+        }
+
+
+
+    }
+
+    template <typename T>
+    void operator()(const communicator& comm, const config& cfg,
+                    T alpha,         matrix_view<T>& A,
+                                     matrix_view<T>& B,
+                    T  beta, scatter_matrix_view<T>& C) const
+    {
+        (void)comm;
+
+        const len_type MR = cfg.gemm_mr.def<T>();
+        const len_type NR = cfg.gemm_nr.def<T>();
+        const bool row_major = cfg.gemm_row_major.value<T>();
+        const len_type rs_ab = (row_major ? NR : 1);
+        const len_type cs_ab = (row_major ? 1 : MR);
+
+        const T* p_a = A.data();
+        const T* p_b = B.data();
+              T* p_c = C.data();
+
+        len_type m = C.length(0);
+        len_type n = C.length(1);
+        len_type k = A.length(1);
+        stride_type rs_c = C.stride(0);
+        stride_type cs_c = C.stride(1);
+        const stride_type* rscat_c = C.scatter(0);
+        const stride_type* cscat_c = C.scatter(1);
+
+        if (m == MR && n == NR && rs_c != 0 && cs_c != 0)
+        {
+            cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                 &beta, p_c, rs_c, cs_c);
+        }
+        else
+        {
+            T p_ab[512] __attribute__((aligned(64)));
+            static constexpr T zero = T(0);
+
+            cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                 &zero, &p_ab[0], rs_ab, cs_ab);
+
+            if (rs_c == 0 && cs_c == 0)
+            {
+                accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c, rscat_c, cscat_c);
+            }
+            else if (rs_c == 0)
+            {
+                accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c, rscat_c, cs_c);
+            }
+            else if (cs_c == 0)
+            {
+                accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c, rs_c, cscat_c);
+            }
+            else
+            {
+                accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c, rs_c, cs_c);
+            }
+        }
+    }
+
+    template <typename T>
+    void operator()(const communicator& comm, const config& cfg,
+                    T alpha,          matrix_view<T>& A,
+                                      matrix_view<T>& B,
+                    T  beta, block_scatter_matrix<T>& C) const
+    {
+        (void)comm;
+
+        const len_type MR = cfg.gemm_mr.def<T>();
+        const len_type NR = cfg.gemm_nr.def<T>();
+        const bool row_major = cfg.gemm_row_major.value<T>();
+        const len_type rs_ab = (row_major ? NR : 1);
+        const len_type cs_ab = (row_major ? 1 : MR);
+
+        const T* p_a = A.data();
+        const T* p_b = B.data();
+              T* p_c = C.data();
+
+        TBLIS_ASSERT(C.block_size(0) == MR &&
+                     C.block_size(1) == NR);
+
+        len_type m = C.length(0);
+        len_type n = C.length(1);
+        len_type k = A.length(1);
+        stride_type rs_c = C.stride(0);
+        stride_type cs_c = C.stride(1);
+        const stride_type* rscat_c = C.scatter(0);
+        const stride_type* cscat_c = C.scatter(1);
+
+        if (m == MR && n == NR && rs_c != 0 && cs_c != 0)
+        {
+            cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                 &beta, p_c, rs_c, cs_c);
+        }
+        else
+        {
+            T p_ab[512] __attribute__((aligned(64)));
+            static constexpr T zero = T(0);
+
+            cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                 &zero, &p_ab[0], rs_ab, cs_ab);
+
+            if (rs_c == 0 && cs_c == 0)
+            {
+                accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c, rscat_c, cscat_c);
+            }
+            else if (rs_c == 0)
+            {
+                accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c, rscat_c, cs_c);
+            }
+            else if (cs_c == 0)
+            {
+                accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c, rs_c, cscat_c);
+            }
+            else
+            {
+                accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c, rs_c, cs_c);
+            }
+        }
+    }
+
+    template <typename T, unsigned N>
+    void operator()(const communicator& comm, const config& cfg,
+                    T alpha,          matrix_view<T>& A,
+                                      matrix_view<T>& B,
+                    T  beta, stra_block_scatter_matrix<T,N>& C) const
+    {
+        //std::cout << "beta:" << beta << std::endl;
+
+        (void)comm;
+
+        const len_type MR = cfg.gemm_mr.def<T>();
+        const len_type NR = cfg.gemm_nr.def<T>();
+        const bool row_major = cfg.gemm_row_major.value<T>();
+        const len_type rs_ab = (row_major ? NR : 1);
+        const len_type cs_ab = (row_major ? 1 : MR);
+
+        const T* p_a = A.data();
+        const T* p_b = B.data();
+
+              //T* p_c = C.data();
+        auto c_list = C.raw_data_list();
+
+              T* p_c_list[N];
+        for (unsigned idx = 0; idx < N; idx++)
+        {
+            //p_c_list[idx] = c_list[idx];
+            p_c_list[idx] = c_list[idx] + (C.stride(idx, 0) == 0 ? 0 : *(C.scatter(idx, 0))) + (C.stride(idx, 1) == 0 ? 0 : *(C.scatter(idx, 1)));
+        }
+
+        auto my_coeff_list = C.coeff_list();
+        T coeff_list[N];
+        for (unsigned idx = 0; idx < N; idx++)
+        {
+            coeff_list[idx] = my_coeff_list[idx];
+        }
+
+        TBLIS_ASSERT(C.block_size(0) == MR &&
+                     C.block_size(1) == NR);
+
+        len_type m = C.length(0);
+        len_type n = C.length(1);
+        len_type k = A.length(1);
+        //stride_type rs_c = C.stride(0);
+        //stride_type cs_c = C.stride(1);
+        stride_type rs_c = C.stride(0, 0);
+        stride_type cs_c = C.stride(0, 1);
+
+        //Check nonzero / same?????
+        //stride_type rs_c[N];
+        //bool is_all_rs_a_nonzero_same = check_all_rs_a_nonzero_same<Trans>( A ) ;
+
+        //const stride_type* rscat_c = C.scatter(0);
+        //const stride_type* cscat_c = C.scatter(1);
+        //////const stride_type* rscat_c = C.scatter(0, 0);
+        //////const stride_type* cscat_c = C.scatter(0, 1);
+
+        const stride_type* rscat_c[N];
+        const stride_type* cscat_c[N];
+        for (unsigned idx = 0; idx < N; idx++)
+        {
+            rscat_c[idx] = C.scatter(idx, 0);
+            cscat_c[idx] = C.scatter(idx, 1);
+        }
+
+        //Original
+        //if (m == MR && n == NR && rs_c != 0 && cs_c != 0)
+        //{
+        //    cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+        //                         &beta, p_c, rs_c, cs_c);
+        //}
+        //else
+        //{
+        //    T p_ab[512] __attribute__((aligned(64)));
+        //    static constexpr T zero = T(0);
+
+        //    cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+        //                         &zero, &p_ab[0], rs_ab, cs_ab);
+
+        //    if (rs_c == 0 && cs_c == 0)
+        //    {
+        //        accum_utile(m, n, p_ab, rs_ab, cs_ab,
+        //                    beta, p_c, rscat_c, cscat_c);
+        //    }
+        //    else if (rs_c == 0)
+        //    {
+        //        accum_utile(m, n, p_ab, rs_ab, cs_ab,
+        //                    beta, p_c, rscat_c, cs_c);
+        //    }
+        //    else if (cs_c == 0)
+        //    {
+        //        accum_utile(m, n, p_ab, rs_ab, cs_ab,
+        //                    beta, p_c, rs_c, cscat_c);
+        //    }
+        //    else
+        //    {
+        //        accum_utile(m, n, p_ab, rs_ab, cs_ab,
+        //                    beta, p_c, rs_c, cs_c);
+        //    }
+        //}
+
+        //std::cout << "p_a:" << std::endl;
+        //for (int i=0; i < m; i++)
+        //{
+        //    for (int p = 0; p < k; p++)
+        //    {
+        //        std::cout << p_a[p*MR+i] << " ";
+        //    }
+        //    std::cout << std::endl;
+        //}
+
+        //std::cout << "p_b:" << std::endl;
+        //for (int p = 0; p < k; p++)
+        //{
+        //    for (int j = 0; j < n; j++)
+        //    {
+        //        std::cout << p_b[p*NR+j] << " ";
+        //    }
+        //    std::cout << std::endl;
+        //}
+
+
+        //std::cout << "m: " << m << "; n: " << n << "; rs_c: " << rs_c << "; cs_c: " << cs_c << std::endl;
+        //Version 1
+        if (m == MR && n == NR && rs_c != 0 && cs_c != 0)
+        {
+            //std::cout << " m == MR && n == NR && rs_c != 0 && cs_c != 0 " << std::endl;
+            T* p_c_list2[N];
+            for (unsigned i = 0; i < N; i++)
+            {
+                p_c_list2[i] = p_c_list[i];
+            }
+
+            //std::cout << "Branch1: rs_c: " << rs_c << ";cs_c: " << cs_c << std::endl;
+            cfg.stra_gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                      &beta, 
+                                      N, p_c_list2, coeff_list, rs_c, cs_c);
+
+
+            if (N == 1) {
+                cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                     &beta, p_c_list2[0], rs_c, cs_c);
+            } else if ( N == 2 ) {
+                cfg.stra_gemm_ukr_two.call<T>(k, &alpha, p_a, p_b,
+                                      &beta, N, p_c_list2, coeff_list, rs_c, cs_c);
+
+            } else if ( N == 4 ) {
+                cfg.stra_gemm_ukr_four.call<T>(k, &alpha, p_a, p_b,
+                                      &beta, N, p_c_list2, coeff_list, rs_c, cs_c);
+
+            } else {
+                std::cout << "N is not 1,2,4" << std::endl;
+                cfg.stra_gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                      &beta, N, p_c_list2, coeff_list, rs_c, cs_c);
+            }
+
+        }
+        else
+        {
+            //std::cout << "Branch2: rs_c: " << rs_c << ";cs_c: " << cs_c << std::endl;
+
+            T p_ab[512] __attribute__((aligned(64)));
+            static constexpr T zero = T(0);
+
+            cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+                                 &zero, &p_ab[0], rs_ab, cs_ab);
+
+            if (rs_c == 0 && cs_c == 0)
+            {
+                //std::cout << "rs_c == 0 && cs_c == 0" << std::endl;
+                //accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+                //                 beta, N, p_c_list, coeff_list, rscat_c, cscat_c);
+
+                if (N == 1) {
+                    accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c_list[0], rscat_c, cscat_c);
+                } else if ( N == 2 ) {
+                    accum_utile_list_two(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rscat_c, cscat_c);
+                } else if ( N == 4 ) {
+                    accum_utile_list_four(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rscat_c, cscat_c);
+                } else {
+                    std::cout << "N is not 1,2,4" << std::endl;
+                    accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rscat_c, cscat_c);
+                }
+
+            }
+            else if (rs_c == 0)
+            {
+                //std::cout << "rs_c == 0 && cs_c != 0" << std::endl;
+                //accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+                //                 beta, N, p_c_list, coeff_list, rscat_c, cs_c);
+
+                if (N == 1) {
+                    accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c_list[0], rscat_c, cs_c);
+                } else if ( N == 2 ) {
+                    accum_utile_list_two(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rscat_c, cs_c);
+                } else if ( N == 4 ) {
+                    accum_utile_list_four(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rscat_c, cs_c);
+                } else {
+                    std::cout << "N is not 1,2,4" << std::endl;
+                    accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rscat_c, cs_c);
+                }
+
+            }
+            else if (cs_c == 0)
+            {
+                //std::cout << "rs_c != 0 && cs_c == 0" << std::endl;
+                //accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+                //                 beta, N, p_c_list, coeff_list, rs_c, cscat_c);
+
+
+                if (N == 1) {
+                    accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c_list[0], rs_c, cscat_c);
+                } else if ( N == 2 ) {
+                    accum_utile_list_two(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rs_c, cscat_c);
+                } else if ( N == 4 ) {
+                    accum_utile_list_four(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rs_c, cscat_c);
+                } else {
+                    std::cout << "N is not 1,2,4" << std::endl;
+                    accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rs_c, cscat_c);
+                }
+            }
+            else
+            {
+                //std::cout << "rs_c != 0 && cs_c != 0" << std::endl;
+                //accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+                //                 beta, N, p_c_list, coeff_list, rs_c, cs_c);
+
+                if (N == 1) {
+                    accum_utile(m, n, p_ab, rs_ab, cs_ab,
+                            beta, p_c_list[0], rs_c, cs_c);
+                } else if ( N == 2 ) {
+                    accum_utile_list_two(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rs_c, cs_c);
+                } else if ( N == 4 ) {
+                    accum_utile_list_four(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rs_c, cs_c);
+                } else {
+                    std::cout << "N is not 1,2,4" << std::endl;
+                    accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+                            beta, N, p_c_list, coeff_list, rs_c, cs_c);
+                }
+
+
+            }
+        }
+
+        
+
+        //T p_ab[512] __attribute__((aligned(64)));
+        //static constexpr T zero = T(0);
+
+        //cfg.gemm_ukr.call<T>(k, &alpha, p_a, p_b,
+        //        &zero, &p_ab[0], rs_ab, cs_ab);
+
+        //accum_utile_list(m, n, p_ab, rs_ab, cs_ab,
+        //        beta, N, p_c_list, coeff_list, rscat_c, cscat_c);
+
+
+    }
+
+};
+
+}
+
+#endif
