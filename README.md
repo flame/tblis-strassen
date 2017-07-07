@@ -9,7 +9,7 @@ Tensor contraction (TC) is an important computational kernel widely used in nume
 
 # Installation
 
-  Information about building, installing, and using the code can be found in [artifact](./blob/master/artifact.pdf).
+  Information about building, installing, and using the code can be found in [artifact](./artifact.pdf).
 
 * Compile the source code:
   Replace `$INSTALL_PATH` with the installation path the user wants to specify.
@@ -117,3 +117,7 @@ recommend citing our
 This material was partially sponsored by grants from the National Science Foundation (Awards ACI-1550493), by Intel Corporation through an Intel Parallel Computing Center grant, and by a gift from Qualcomm Foundation.
 
 _Any opinions, findings and conclusions or recommendations expressed in this material are those of the author(s) and do not necessarily reflect the views of the National Science Foundation (NSF)._
+
+# Feedback
+Bugs can be reported to jianyu@cs.utexas.edu. Any feedback, feature requests, and comments are welcome.
+
