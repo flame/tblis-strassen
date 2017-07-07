@@ -33,19 +33,12 @@ Tensor contraction (TC) is an important computational kernel widely used in nume
   `$IMPL`: implementations [ 1: ABC Strassen, 2: AB Strassen, 3: Naive Strassen ];
   `$seed`: random seeds.
 
-  Usage:
-```
-  ./test_strassen -niter $niter -level $L -impl $IMPL -seed $seed -file $filename
-```
-  `$niter`: number of iterations;
-  `$L`: levels of Strassen ( `L=0` will invoke regular tblis TC routine);
-  `$IMPL`: implementations [ 1: ABC Strassen, 2: AB Strassen, 3: Naive Strassen ];
-  `$filename`: the benchmark file.
-  `$seed`: random seeds.
-
 * Options for random seed $seed:
-  if `$seed == -1`: default seeding.
-  if `$seed` is equal to any number other than -1, `$seed` will be used as the random seed for the synthetic tensor sizes, shapes, and permutations.
+
+  if `$seed == -1`: default seeding;
+
+  if `$seed` is equal to any number other than -1, `$seed` will be used as the random seed for the synthetic tensor sizes, shapes, and permutations;
+
   if not specified, using time as the random seed.
 
 * Set up environment variables:
